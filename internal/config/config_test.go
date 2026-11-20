@@ -70,6 +70,18 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 }
 
+func TestLoad_KagentDefaults(t *testing.T) {
+	c, err := Load(writeConfig(t, minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Kagent.Namespace != "kagent" || c.Kagent.Service != "http:kagent-controller:8083" ||
+		c.Kagent.AgentNamespace != "kagent" || c.Kagent.AgentName != "rps-agent" ||
+		c.Clusters.CacheTTL != 2*time.Minute || c.API.Timeout != 15*time.Second {
+		t.Fatalf("bad defaults: %+v %+v %+v", c.Kagent, c.Clusters, c.API)
+	}
+}
+
 func TestLoad_Durations(t *testing.T) {
 	c, err := Load(writeConfig(t, "session:\n  idle_timeout: 2m\n"+minimal))
 	if err != nil {
@@ -122,6 +134,13 @@ func TestLoad_Rejects(t *testing.T) {
 		{"idle > absolute", "session:\n  idle_timeout: 9h\n  absolute_timeout: 8h\n" + minimal, "idle_timeout"},
 		{"half tls", "tls:\n  cert_file: /x.pem\n" + minimal, "tls"},
 		{"unknown key", "bogus: 1\n" + minimal, "bogus"},
+		{"agent_name slash", "kagent:\n  agent_name: a/b\n" + minimal, "agent_name"},
+		{"namespace slash", "kagent:\n  namespace: a/b\n" + minimal, "namespace"},
+		{"service query", "kagent:\n  service: a?b\n" + minimal, "service"},
+		{"agent_namespace hash", "kagent:\n  agent_namespace: a#b\n" + minimal, "agent_namespace"},
+		{"negative cache_ttl", "clusters:\n  cache_ttl: -1s\n" + minimal, "cache_ttl"},
+		{"negative api timeout", "api:\n  timeout: -1s\n" + minimal, "api.timeout"},
+		{"unknown clusters key", "clusters:\n  include_local: true\n" + minimal, "include_local"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

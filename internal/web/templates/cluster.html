@@ -1,0 +1,30 @@
+{{define "content"}}
+<h2>{{.Row.DisplayName}}</h2>
+<p class="meta">Site {{.Row.Site}} · ID <code>{{.Row.ID}}</code></p>
+<p class="result-{{.Check.Outcome}}">{{.Check.Message}}</p>
+{{with .Check.Card}}
+<table>
+  <tbody>
+  <tr><th>Agent</th><td>{{.Name}}</td></tr>
+  <tr><th>Description</th><td>{{.Description}}</td></tr>
+  <tr><th>Version</th><td>{{.Version}}</td></tr>
+  <tr><th>Streaming</th><td>{{.Streaming}}</td></tr>
+  </tbody>
+</table>
+{{end}}
+<h3>Diagnostics</h3>
+<table>
+  <tbody>
+  <tr><th>Outcome</th><td>{{.Check.Outcome}}</td></tr>
+  <tr><th>SSAR allowed</th><td>{{if .Check.SSARAllowed}}{{.Check.SSARAllowed | deref}}{{end}}</td></tr>
+  <tr><th>SSAR reason</th><td>{{.Check.SSARReason}}</td></tr>
+  <tr><th>SSAR HTTP</th><td>{{if .Check.SSARCode}}{{.Check.SSARCode}}{{end}}</td></tr>
+  <tr><th>SSAR latency</th><td>{{if .Check.SSARLatency}}{{.Check.SSARLatency.Milliseconds}} ms{{end}}</td></tr>
+  <tr><th>Card HTTP</th><td>{{if .Check.CardCode}}{{.Check.CardCode}}{{end}}</td></tr>
+  <tr><th>Card latency</th><td>{{if .Check.CardLatency}}{{.Check.CardLatency.Milliseconds}} ms{{end}}</td></tr>
+  <tr><th>Error</th><td>{{.Check.Error}}</td></tr>
+  </tbody>
+</table>
+<p><button disabled>Chat (coming in Plan 3)</button></p>
+<p><a href="/home">Back to clusters</a></p>
+{{end}}

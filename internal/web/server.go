@@ -10,9 +10,12 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/config"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/session"
 )
@@ -35,9 +38,17 @@ type Authn interface {
 	Logout(ctx context.Context, sites []auth.SiteResult) []auth.LogoutResult
 }
 
+// Clusters is what the web layer needs from clusters.Service.
+type Clusters interface {
+	List(ctx context.Context, sites []auth.SiteResult) *clusters.Listing
+	Check(ctx context.Context, sites []auth.SiteResult, row clusters.Row, principal string) clusters.CheckResult
+}
+
 type server struct {
 	cfg     *config.Config
 	authn   Authn
+	cl      Clusters
+	now     func() time.Time
 	store   *session.Store
 	version string
 	log     *slog.Logger
@@ -45,30 +56,38 @@ type server struct {
 }
 
 // New returns the portal's HTTP handler.
-func New(cfg *config.Config, a Authn, store *session.Store, version string, log *slog.Logger) (http.Handler, error) {
-	s := &server{cfg: cfg, authn: a, store: store, version: version, log: log, pages: map[string]*template.Template{}}
-	funcs := template.FuncMap{"principal": principalOf}
-	for _, p := range []string{"login", "home", "loggedout"} {
+func New(cfg *config.Config, a Authn, c Clusters, store *session.Store, version string, log *slog.Logger) (http.Handler, error) {
+	_, h, err := build(cfg, a, c, store, version, log)
+	return h, err
+}
+
+func build(cfg *config.Config, a Authn, c Clusters, store *session.Store, version string, log *slog.Logger) (*server, http.Handler, error) {
+	s := &server{cfg: cfg, authn: a, cl: c, now: time.Now, store: store, version: version, log: log, pages: map[string]*template.Template{}}
+	funcs := template.FuncMap{"principal": principalOf, "esc": url.PathEscape, "deref": func(b *bool) bool { return *b }}
+	for _, p := range []string{"login", "home", "diagnostics", "cluster", "loggedout"} {
 		t, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/"+p+".html")
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		s.pages[p] = t
 	}
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
 	mux.HandleFunc("POST /login", s.login)
 	mux.HandleFunc("GET /home", s.home)
+	mux.HandleFunc("GET /diagnostics", s.diagnostics)
+	mux.HandleFunc("POST /clusters/refresh", s.refresh)
+	mux.HandleFunc("GET /clusters/{site}/{id}", s.cluster)
 	mux.HandleFunc("POST /logout", s.logout)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(version + "\n")) })
-	return securityHeaders(mux), nil
+	return s, securityHeaders(mux), nil
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -97,6 +116,11 @@ type pageData struct {
 	Username string
 	Session  *session.Session
 	Logout   []auth.LogoutResult
+	Listing  *clusters.Listing
+	Rows     []clusters.Row
+	Query    string
+	Row      clusters.Row
+	Check    clusters.CheckResult
 }
 
 func (s *server) render(w http.ResponseWriter, code int, page string, d pageData) {
@@ -180,13 +204,69 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/home", http.StatusSeeOther)
 }
 
+// listing returns the session's cached cluster list, refetching it when
+// missing or older than clusters.cache_ttl.
+func (s *server) listing(r *http.Request, sess *session.Session) *clusters.Listing {
+	if l := sess.Clusters; l != nil && s.now().Sub(l.Fetched) < s.cfg.Clusters.CacheTTL {
+		return l
+	}
+	l := s.cl.List(r.Context(), sess.Sites)
+	// A cancelled request's result may be partial; use it for this response only.
+	if r.Context().Err() == nil {
+		s.store.SetClusters(sess.ID, l)
+	}
+	return l
+}
+
 func (s *server) home(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.current(r)
 	if !ok {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	s.render(w, http.StatusOK, "home", pageData{Session: sess})
+	l := s.listing(r, sess)
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	s.render(w, http.StatusOK, "home", pageData{Session: sess, Listing: l, Rows: l.Filter(q), Query: q})
+}
+
+func (s *server) diagnostics(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.current(r)
+	if !ok {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	s.render(w, http.StatusOK, "diagnostics", pageData{Session: sess, Listing: s.listing(r, sess)})
+}
+
+func (s *server) refresh(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.current(r)
+	if !ok {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxFormSize)
+	_ = r.ParseForm()
+	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(sess.CSRF)) != 1 {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	s.store.SetClusters(sess.ID, nil)
+	http.Redirect(w, r, "/home", http.StatusSeeOther)
+}
+
+func (s *server) cluster(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.current(r)
+	if !ok {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	row, found := s.listing(r, sess).Find(r.PathValue("site"), r.PathValue("id"))
+	if !found {
+		http.Error(w, "cluster not found", http.StatusNotFound)
+		return
+	}
+	res := s.cl.Check(r.Context(), sess.Sites, row, sess.Principal)
+	s.render(w, http.StatusOK, "cluster", pageData{Session: sess, Row: row, Check: res})
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {

@@ -1,30 +1,42 @@
 {{define "content"}}
 {{with .Session}}
-<h2>Logged in as {{.Username}}</h2>
-<p>Principal: <code>{{if .Principal}}{{.Principal}}{{else}}(none found){{end}}</code></p>
+<h2>Clusters</h2>
+<p class="meta">Logged in as {{.Username}}.</p>
 {{range .Warnings}}<p class="warning">{{.}}</p>{{end}}
+{{end}}
+{{with .Listing}}
+<p class="summary">{{range $i, $s := .Sites}}{{if $i}} · {{end}}{{$s.Site}}: {{if eq $s.Status "ok"}}{{$s.Count}}{{if eq $i 0}} clusters{{end}}{{else if eq $s.Status "error"}}{{$s.Error}}{{else}}not logged in{{end}}{{end}}</p>
+{{range .Sites}}{{if eq .Status "error"}}<p class="warning">{{.Site}}: {{.Error}}</p>{{end}}{{end}}
+{{end}}
+<form method="get" action="/home" class="filter">
+  <input name="q" value="{{.Query}}" placeholder="Filter by name or ID">
+  <button type="submit">Filter</button>
+</form>
 <table>
-  <thead><tr><th>Site</th><th>Status</th><th>HTTP</th><th>Token id</th><th>Expires at</th><th>Rancher user</th><th>Principal IDs</th><th>Latency</th><th>Error</th></tr></thead>
+  <thead><tr><th>Name</th><th>Site</th><th>ID</th><th>State</th></tr></thead>
   <tbody>
-  {{range .Sites}}
-  <tr class="status-{{.Status}}">
-    <td>{{.Site}}</td>
-    <td>{{.Status}}</td>
-    <td>{{if .HTTPCode}}{{.HTTPCode}}{{end}}</td>
-    <td><code>{{.Token.ID}}</code></td>
-    <td>{{.Token.ExpiresAt}}</td>
-    <td>{{with .User}}{{.ID}} ({{.Username}}){{else}}{{.Token.UserID}}{{end}}</td>
-    <td>{{with .User}}{{range .PrincipalIDs}}<code>{{.}}</code><br>{{end}}{{end}}{{with .MeError}}<span class="error">users?me=true: {{.}}</span>{{end}}</td>
-    <td>{{if .Latency}}{{.Latency.Milliseconds}} ms{{end}}</td>
-    <td>{{.Error}}</td>
-  </tr>
+  {{range .Rows}}
+  {{if .Connected}}
+  <tr><td><a href="/clusters/{{esc .Site}}/{{esc .ID}}">{{.DisplayName}}</a></td><td>{{.Site}}</td><td><code>{{.ID}}</code></td><td>{{.State}}</td></tr>
+  {{else}}
+  <tr class="disconnected"><td>{{.DisplayName}}</td><td>{{.Site}}</td><td><code>{{.ID}}</code></td><td>{{.State}}</td></tr>
+  {{end}}
+  {{else}}
+  <tr><td colspan="4">No clusters.</td></tr>
   {{end}}
   </tbody>
 </table>
-<p class="meta">Session started {{.Created.Format "2006-01-02 15:04:05 MST"}}.</p>
+{{with .Session}}
+<div class="actions">
+<form method="post" action="/clusters/refresh">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <button type="submit">Refresh</button>
+</form>
+<a href="/diagnostics">Diagnostics</a>
 <form method="post" action="/logout">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <button type="submit">Log out of all sites</button>
 </form>
+</div>
 {{end}}
 {{end}}

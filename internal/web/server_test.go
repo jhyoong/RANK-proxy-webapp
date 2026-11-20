@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/config"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/rancher"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/session"
@@ -53,22 +54,66 @@ func okResult() auth.Result {
 		{Site: "site-3", Status: auth.StatusUnavailable, Error: "connection refused"}}}
 }
 
+type stubClusters struct {
+	listing    *clusters.Listing
+	check      clusters.CheckResult
+	listCalls  int
+	checkCalls int
+	now        func() time.Time
+}
+
+func (s *stubClusters) List(_ context.Context, _ []auth.SiteResult) *clusters.Listing {
+	s.listCalls++
+	l := *s.listing
+	l.Fetched = s.now()
+	return &l
+}
+
+func (s *stubClusters) Check(_ context.Context, _ []auth.SiteResult, _ clusters.Row, _ string) clusters.CheckResult {
+	s.checkCalls++
+	return s.check
+}
+
+func defaultListing() *clusters.Listing {
+	return &clusters.Listing{
+		Sites: []clusters.SiteList{
+			{Site: "site-1", Status: "ok", HTTPCode: 200, Count: 2, Latency: 30 * time.Millisecond},
+			{Site: "site-2", Status: "ok", HTTPCode: 200, Count: 1, Latency: 20 * time.Millisecond},
+			{Site: "site-3", Status: "skipped"},
+		},
+		Rows: []clusters.Row{
+			{Site: "site-1", Cluster: rancher.Cluster{ID: "c-abc12", DisplayName: "prod-east", State: "active", Connected: true,
+				Conditions: []rancher.Condition{{Type: "Ready", Status: "True", Reason: "AllGood"}, {Type: "Connected", Status: "True"}}}},
+			{Site: "site-1", Cluster: rancher.Cluster{ID: "c-down1", DisplayName: "dev-west", State: "provisioning", Connected: false}},
+			{Site: "site-2", Cluster: rancher.Cluster{ID: "c-xyz99", DisplayName: "prod-south", State: "active", Connected: true}},
+		},
+	}
+}
+
 type harness struct {
 	h     http.Handler
 	stub  *stubAuthn
 	store *session.Store
+	cl    *stubClusters
+	clock *time.Time
 }
 
 func newHarness(t *testing.T, secure bool) harness {
 	t.Helper()
-	cfg := &config.Config{CookieSecure: &secure, Sites: []config.Site{{Name: "site-1"}, {Name: "site-2"}, {Name: "site-3"}}}
+	cfg := &config.Config{CookieSecure: &secure, Sites: []config.Site{{Name: "site-1"}, {Name: "site-2"}, {Name: "site-3"}},
+		Clusters: config.ClustersConfig{CacheTTL: 2 * time.Minute}}
 	stub := &stubAuthn{result: okResult()}
+	clock := time.Now()
+	hs := &harness{}
+	cl := &stubClusters{listing: defaultListing(), now: func() time.Time { return *hs.clock }}
 	store := session.NewStore(30*time.Minute, 8*time.Hour, time.Now)
-	h, err := New(cfg, stub, store, "v-test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv, h, err := build(cfg, stub, cl, store, "v-test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return harness{h, stub, store}
+	srv.now = func() time.Time { return *hs.clock }
+	hs.h, hs.stub, hs.store, hs.cl, hs.clock = h, stub, store, cl, &clock
+	return *hs
 }
 
 func (hs harness) do(method, path string, form url.Values, cookie *http.Cookie) *httptest.ResponseRecorder {
@@ -160,13 +205,13 @@ func TestIndex_UnknownErrorCodeIgnored(t *testing.T) {
 	}
 }
 
-func TestHome_RancherUserFromMe(t *testing.T) {
+func TestDiagnostics_RancherUserFromMe(t *testing.T) {
 	hs := newHarness(t, true)
 	for i := range hs.stub.result.Sites {
 		hs.stub.result.Sites[i].Token.UserID = ""
 	}
 	c := hs.login(t)
-	body := hs.do("GET", "/home", nil, c).Body.String()
+	body := hs.do("GET", "/diagnostics", nil, c).Body.String()
 	if !strings.Contains(body, "u-abc") || !strings.Contains(body, "jdoe") {
 		t.Fatal("Rancher user id/username from users?me=true not shown")
 	}
@@ -206,18 +251,19 @@ func TestIndex(t *testing.T) {
 	}
 }
 
-func TestHome_ShowsSiteTable(t *testing.T) {
+func TestDiagnostics_ShowsLoginAndClusterTables(t *testing.T) {
 	hs := newHarness(t, true)
 	c := hs.login(t)
-	rr := hs.do("GET", "/home", nil, c)
+	rr := hs.do("GET", "/diagnostics", nil, c)
 	body := rr.Body.String()
 	if rr.Code != 200 {
 		t.Fatalf("status %d", rr.Code)
 	}
 	for _, want := range []string{"site-1", "site-2", "site-3", "token-abc12", "2026-11-20T17:00:00Z", "u-abc",
-		"activedirectory_user://CN=Test User (Admin), OU=Example Admins,DC=example,DC=com", "connection refused", "unavailable", "v-test"} {
+		"activedirectory_user://CN=Test User (Admin), OU=Example Admins,DC=example,DC=com", "connection refused", "unavailable", "v-test",
+		"c-abc12", "prod-east", "provisioning", "Ready: True AllGood", "Connected: True", "Cluster list"} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("home missing %q", want)
+			t.Fatalf("diagnostics missing %q", want)
 		}
 	}
 }
@@ -232,11 +278,14 @@ func TestHome_EscapesHTML(t *testing.T) {
 	}
 }
 
-func TestHome_DoesNotLeakToken(t *testing.T) {
+func TestPages_DoNotLeakToken(t *testing.T) {
 	hs := newHarness(t, true)
+	hs.cl.check = clusters.CheckResult{Outcome: clusters.OutcomeReady, Message: "kagent is ready"}
 	c := hs.login(t)
-	if body := hs.do("GET", "/home", nil, c).Body.String(); strings.Contains(body, "SECRETVALUE") {
-		t.Fatal("bearer secret rendered")
+	for _, p := range []string{"/home", "/diagnostics", "/clusters/site-1/c-abc12"} {
+		if body := hs.do("GET", p, nil, c).Body.String(); strings.Contains(body, "SECRETVALUE") || strings.Contains(body, "token-abc12:") {
+			t.Fatalf("%s: bearer secret rendered", p)
+		}
 	}
 }
 
@@ -309,7 +358,7 @@ func TestLogout_NoSession(t *testing.T) {
 func TestSecurityHeaders(t *testing.T) {
 	hs := newHarness(t, true)
 	c := hs.login(t)
-	for _, p := range []string{"/", "/home", "/healthz", "/version", "/static/style.css", "/nope"} {
+	for _, p := range []string{"/", "/home", "/diagnostics", "/healthz", "/version", "/static/style.css", "/nope"} {
 		rr := hs.do("GET", p, nil, c)
 		h := rr.Header()
 		if h.Get("Content-Security-Policy") != wantCSP || h.Get("Cache-Control") != "no-store" ||
@@ -337,5 +386,184 @@ func TestCookieSecureFalse(t *testing.T) {
 	rr := hs.do("POST", "/login", url.Values{"username": {"jdoe"}, "password": {"pw"}}, nil)
 	if strings.Contains(rr.Header().Get("Set-Cookie"), "Secure") {
 		t.Fatal("Secure set when cookie_secure=false")
+	}
+}
+
+func TestHome_ListsClusters(t *testing.T) {
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	rr := hs.do("GET", "/home", nil, c)
+	body := rr.Body.String()
+	if rr.Code != 200 {
+		t.Fatalf("status %d", rr.Code)
+	}
+	for _, want := range []string{"prod-east", "dev-west", "prod-south", "c-abc12", "site-1: 2 clusters", "site-2: 1",
+		`href="/clusters/site-1/c-abc12"`, "Diagnostics", "Refresh"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("home missing %q", want)
+		}
+	}
+	if strings.Contains(body, "/clusters/site-1/c-down1") {
+		t.Fatal("disconnected row must not link")
+	}
+	if !strings.Contains(body, `class="disconnected"`) {
+		t.Fatal("disconnected class missing")
+	}
+}
+
+func TestHome_CachesList(t *testing.T) {
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	hs.do("GET", "/home", nil, c)
+	hs.do("GET", "/home", nil, c)
+	if hs.cl.listCalls != 1 {
+		t.Fatalf("list calls %d, want 1", hs.cl.listCalls)
+	}
+	*hs.clock = hs.clock.Add(3 * time.Minute)
+	hs.do("GET", "/home", nil, c)
+	if hs.cl.listCalls != 2 {
+		t.Fatalf("list calls %d, want 2 after TTL", hs.cl.listCalls)
+	}
+}
+
+func TestRefresh_RequiresCSRF(t *testing.T) {
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	hs.do("GET", "/home", nil, c)
+	for _, f := range []url.Values{{"csrf": {"wrong"}}, {}} {
+		if rr := hs.do("POST", "/clusters/refresh", f, c); rr.Code != http.StatusForbidden {
+			t.Fatalf("status %d", rr.Code)
+		}
+	}
+	rr := hs.do("POST", "/clusters/refresh", url.Values{"csrf": {csrfFrom(t, hs, c)}}, c)
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/home" {
+		t.Fatalf("status %d loc %q", rr.Code, rr.Header().Get("Location"))
+	}
+	before := hs.cl.listCalls
+	hs.do("GET", "/home", nil, c)
+	if hs.cl.listCalls != before+1 {
+		t.Fatalf("list calls %d -> %d, want refetch", before, hs.cl.listCalls)
+	}
+}
+
+func TestRefresh_NoSession(t *testing.T) {
+	hs := newHarness(t, true)
+	if rr := hs.do("POST", "/clusters/refresh", url.Values{"csrf": {"x"}}, nil); rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/" {
+		t.Fatalf("status %d", rr.Code)
+	}
+}
+
+func TestHome_SiteErrorBanner(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.cl.listing.Sites[1] = clusters.SiteList{Site: "site-2", Status: "error", HTTPCode: 401, Error: "token expired or revoked: log in again"}
+	hs.cl.listing.Rows = hs.cl.listing.Rows[:2]
+	c := hs.login(t)
+	rr := hs.do("GET", "/home", nil, c)
+	body := rr.Body.String()
+	if rr.Code != 200 || !strings.Contains(body, "token expired or revoked: log in again") || !strings.Contains(body, `class="warning"`) ||
+		!strings.Contains(body, "prod-east") {
+		t.Fatalf("status %d, banner/rows missing", rr.Code)
+	}
+}
+
+func TestHome_Filter(t *testing.T) {
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	body := hs.do("GET", "/home?q=prod", nil, c).Body.String()
+	if !strings.Contains(body, "prod-east") || !strings.Contains(body, "prod-south") || strings.Contains(body, "dev-west") {
+		t.Fatal("filter result wrong")
+	}
+	if !strings.Contains(body, `value="prod"`) {
+		t.Fatal("filter input lost value")
+	}
+}
+
+func TestHome_EscapesClusterName(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.cl.listing.Rows[0].DisplayName = "<b>x</b>"
+	c := hs.login(t)
+	body := hs.do("GET", "/home", nil, c).Body.String()
+	if strings.Contains(body, "<b>x</b>") || !strings.Contains(body, "&lt;b&gt;x&lt;/b&gt;") {
+		t.Fatal("display name not escaped")
+	}
+	if !strings.Contains(body, `href="/clusters/site-1/c-abc12"`) {
+		t.Fatal("link must use the ID")
+	}
+}
+
+func TestCluster_Ready(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.cl.check = clusters.CheckResult{Outcome: clusters.OutcomeReady, Message: "kagent is ready",
+		Card: &rancher.Card{Name: "k8s-agent", Description: "does things", Version: "1.2.3"}}
+	c := hs.login(t)
+	rr := hs.do("GET", "/clusters/site-1/c-abc12", nil, c)
+	body := rr.Body.String()
+	if rr.Code != 200 {
+		t.Fatalf("status %d", rr.Code)
+	}
+	for _, want := range []string{"kagent is ready", "result-ready", "k8s-agent", "prod-east", "<button disabled>Chat (coming in Plan 3)</button>", `href="/home"`, "<th>Outcome</th><td>ready</td>"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("cluster page missing %q", want)
+		}
+	}
+	if hs.cl.checkCalls != 1 {
+		t.Fatalf("check calls %d", hs.cl.checkCalls)
+	}
+}
+
+func TestHome_CancelledListNotCached(t *testing.T) {
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest("GET", "/home", nil).WithContext(ctx)
+	req.AddCookie(c)
+	hs.h.ServeHTTP(httptest.NewRecorder(), req)
+	before := hs.cl.listCalls
+	if before == 0 {
+		t.Fatal("list not called")
+	}
+	hs.do("GET", "/home", nil, c)
+	if hs.cl.listCalls != before+1 {
+		t.Fatalf("list calls %d, want %d (cancelled result was cached)", hs.cl.listCalls, before+1)
+	}
+}
+
+func TestCluster_UnknownIDNoRancherCall(t *testing.T) {
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	for _, p := range []string{"/clusters/site-1/c-nope", "/clusters/site-1/local", "/clusters/nosite/c-abc12"} {
+		if rr := hs.do("GET", p, nil, c); rr.Code != http.StatusNotFound {
+			t.Fatalf("%s: status %d", p, rr.Code)
+		}
+	}
+	if hs.cl.checkCalls != 0 {
+		t.Fatalf("check calls %d", hs.cl.checkCalls)
+	}
+}
+
+func TestCluster_NoSessionRedirects(t *testing.T) {
+	hs := newHarness(t, true)
+	rr := hs.do("GET", "/clusters/site-1/c-abc12", nil, nil)
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/" {
+		t.Fatalf("status %d", rr.Code)
+	}
+}
+
+func TestCluster_StaleCacheRelists(t *testing.T) {
+	hs := newHarness(t, true)
+	full := hs.cl.listing
+	hs.cl.listing = &clusters.Listing{Sites: full.Sites}
+	hs.cl.check = clusters.CheckResult{Outcome: clusters.OutcomeReady, Message: "kagent is ready"}
+	c := hs.login(t)
+	hs.do("GET", "/home", nil, c)
+	if hs.cl.listCalls != 1 {
+		t.Fatalf("list calls %d", hs.cl.listCalls)
+	}
+	hs.cl.listing = full
+	*hs.clock = hs.clock.Add(3 * time.Minute)
+	rr := hs.do("GET", "/clusters/site-1/c-abc12", nil, c)
+	if rr.Code != 200 || hs.cl.listCalls != 2 {
+		t.Fatalf("status %d list calls %d", rr.Code, hs.cl.listCalls)
 	}
 }

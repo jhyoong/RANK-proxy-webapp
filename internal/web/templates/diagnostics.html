@@ -1,0 +1,55 @@
+{{define "content"}}
+{{with .Session}}
+<h2>Logged in as {{.Username}}</h2>
+<p>Principal: <code>{{if .Principal}}{{.Principal}}{{else}}(none found){{end}}</code></p>
+{{range .Warnings}}<p class="warning">{{.}}</p>{{end}}
+<table>
+  <thead><tr><th>Site</th><th>Status</th><th>HTTP</th><th>Token id</th><th>Expires at</th><th>Rancher user</th><th>Principal IDs</th><th>Latency</th><th>Error</th></tr></thead>
+  <tbody>
+  {{range .Sites}}
+  <tr class="status-{{.Status}}">
+    <td>{{.Site}}</td>
+    <td>{{.Status}}</td>
+    <td>{{if .HTTPCode}}{{.HTTPCode}}{{end}}</td>
+    <td><code>{{.Token.ID}}</code></td>
+    <td>{{.Token.ExpiresAt}}</td>
+    <td>{{with .User}}{{.ID}} ({{.Username}}){{else}}{{.Token.UserID}}{{end}}</td>
+    <td>{{with .User}}{{range .PrincipalIDs}}<code>{{.}}</code><br>{{end}}{{end}}{{with .MeError}}<span class="error">users?me=true: {{.}}</span>{{end}}</td>
+    <td>{{if .Latency}}{{.Latency.Milliseconds}} ms{{end}}</td>
+    <td>{{.Error}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+<p class="meta">Session started {{.Created.Format "2006-01-02 15:04:05 MST"}}.</p>
+{{end}}
+{{with .Listing}}
+<h2>Cluster list</h2>
+<p class="meta">Fetched {{.Fetched.Format "2006-01-02 15:04:05 MST"}}.</p>
+<table>
+  <thead><tr><th>Site</th><th>Status</th><th>HTTP</th><th>Count</th><th>Latency</th><th>Error</th></tr></thead>
+  <tbody>
+  {{range .Sites}}
+  <tr class="status-{{.Status}}">
+    <td>{{.Site}}</td><td>{{.Status}}</td><td>{{if .HTTPCode}}{{.HTTPCode}}{{end}}</td><td>{{.Count}}</td>
+    <td>{{if .Latency}}{{.Latency.Milliseconds}} ms{{end}}</td><td>{{.Error}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+<table>
+  <thead><tr><th>Site</th><th>ID</th><th>Name</th><th>State</th><th>Connected</th><th>Ready</th></tr></thead>
+  <tbody>
+  {{range .Rows}}
+  <tr>
+    <td>{{.Site}}</td><td><code>{{.ID}}</code></td><td>{{.DisplayName}}</td><td>{{.State}}</td>
+    {{$conds := .Conditions}}
+    <td>{{range $conds}}{{if eq .Type "Connected"}}Connected: {{.Status}} {{.Reason}}{{end}}{{end}}</td>
+    <td>{{range $conds}}{{if eq .Type "Ready"}}Ready: {{.Status}} {{.Reason}}{{end}}{{end}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+<p><a href="/home">Back to clusters</a></p>
+{{end}}

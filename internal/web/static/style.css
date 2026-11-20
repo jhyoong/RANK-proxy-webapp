@@ -19,3 +19,12 @@ tr.status-rejected td, tr.status-unavailable td { background: #fef2f2; }
 tr.status-rejected td:nth-child(2), tr.status-unavailable td:nth-child(2) { color: #b91c1c; font-weight: 600; }
 tr.status-skipped td { color: #6b7280; }
 .meta { color: #6b7280; font-size: .85rem; }
+tr.disconnected td { color: #9ca3af; background: #f9fafb; }
+.summary { font-size: .9rem; }
+.actions { display: flex; gap: 1rem; align-items: center; }
+.filter { display: flex; gap: .5rem; }
+button[disabled] { background: #9ca3af; cursor: not-allowed; }
+.result-ready { color: #15803d; font-weight: 600; }
+.result-disconnected, .result-expired { color: #6b7280; font-weight: 600; }
+.result-no-access, .result-not-installed, .result-not-running, .result-unreachable, .result-denied,
+.result-bad-card, .result-unexpected, .result-check-failed { color: #b91c1c; font-weight: 600; }

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/config"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/rancher"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/session"
@@ -55,7 +56,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, ready chan<- stri
 		return err
 	}
 
-	var clients []*rancher.Client
+	var clients, apiClients []*rancher.Client
 	var siteAttrs []any
 	for _, s := range cfg.Sites {
 		c, err := rancher.NewClient(s, cfg.Login.Timeout)
@@ -63,11 +64,16 @@ func run(ctx context.Context, args []string, stdout io.Writer, ready chan<- stri
 			return err
 		}
 		clients = append(clients, c)
+		ac, err := rancher.NewClient(s, cfg.API.Timeout)
+		if err != nil {
+			return err
+		}
+		apiClients = append(apiClients, ac)
 		siteAttrs = append(siteAttrs, slog.Group(s.Name, "url", s.URL, "ca_file", s.CAFile))
 	}
 
 	store := session.NewStore(cfg.Session.IdleTimeout, cfg.Session.AbsoluteTimeout, time.Now)
-	handler, err := web.New(cfg, auth.New(clients, cfg.Session.AbsoluteTimeout, log), store, version, log)
+	handler, err := web.New(cfg, auth.New(clients, cfg.Session.AbsoluteTimeout, log), clusters.New(apiClients, cfg.Kagent, log), store, version, log)
 	if err != nil {
 		return err
 	}
@@ -80,7 +86,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, ready chan<- stri
 	useTLS := cfg.TLS.CertFile != ""
 	log.Info("portal listening", "version", version, "listen", ln.Addr().String(), "tls", useTLS,
 		"idle_timeout", cfg.Session.IdleTimeout.String(), "absolute_timeout", cfg.Session.AbsoluteTimeout.String(),
-		"cookie_secure", cfg.SecureCookies(), slog.Group("sites", siteAttrs...))
+		"cookie_secure", cfg.SecureCookies(), "kagent.agent_name", cfg.Kagent.AgentName, slog.Group("sites", siteAttrs...))
 
 	go func() {
 		t := time.NewTicker(time.Minute)

@@ -17,14 +17,20 @@ The portal reads one YAML file: `-config <path>`, else `$PORTAL_CONFIG`, else `/
 
 ## Run locally with the fake Rancher
 
-Plan 1 (login flow only) can be clicked through without a real Rancher:
+The login flow, cluster list and kagent access check can be clicked through without a real Rancher:
 
 ```sh
-go run ./cmd/fakerancher                      # 3 fake sites on 127.0.0.1:9441-9443, writes dev/config.yaml
+go run ./cmd/fakerancher                      # 3 fake sites on 127.0.0.1:9441-9443 (40 clusters each), writes dev/config.yaml
 go run ./cmd/portal -config dev/config.yaml   # then open http://127.0.0.1:8080
 ```
 
-Test users: `admin1`/`pass1` (all sites ok), `drift`/`pass1` (site-2 rejects: drift warning), `nopr`/`pass1` (no AD principal warning). A wrong password should show only site-1 hit in the fakerancher log.
+Test users: `admin1`/`pass1` (all sites ok), `drift`/`pass1` (site-2 rejects: drift warning), `nopr`/`pass1` (no AD principal warning), `limited`/`pass1` (logs in everywhere, but `no-access` on every `prod` cluster). A wrong password should show only site-1 hit in the fakerancher log.
+
+Pages:
+
+- `/home`: the cluster list across sites (about 120 rows; each site's `local` cluster is hidden). Filter with `?q=prod`; the Refresh button reloads the list from Rancher (the list is otherwise cached for `clusters.cache_ttl`). Disconnected clusters are greyed out.
+- `/clusters/{site}/{id}`: runs the kagent check for one cluster and shows the result (`ready`, `no-access`, `not-installed`, `not-running`, `unreachable`, ...). In the fake, each site has one cluster whose agent card returns 404 (`not-installed`), one 503 (`not-running`) and one that hangs (`unreachable` after the 5s API timeout).
+- `/diagnostics`: the per-site login table plus the raw cluster list with states and conditions.
 
 With Docker, mount the config and CA files:
 
@@ -32,7 +38,7 @@ With Docker, mount the config and CA files:
 docker run --rm -p 8080:8080 -v $PWD/my-config:/etc/portal:ro portal:local
 ```
 
-For the on-site live test, see [docs/plans/PLAN1-live-test.md](docs/plans/PLAN1-live-test.md) and [deploy/portal.yaml](deploy/portal.yaml).
+For the on-site live test (the `kagent`, `clusters` and `api` blocks in the ConfigMap are the ones to adjust), see [docs/plans/PLAN1-live-test.md](docs/plans/PLAN1-live-test.md), [docs/plans/PLAN2-live-test.md](docs/plans/PLAN2-live-test.md) and [deploy/portal.yaml](deploy/portal.yaml).
 
 ## Image pipeline
 

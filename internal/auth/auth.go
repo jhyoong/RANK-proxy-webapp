@@ -86,7 +86,7 @@ func (a *Authenticator) SetRevokeRetry(tries int, delay time.Duration) {
 // classify maps a login error to a status, HTTP code and display message.
 func classify(err error) (Status, int, string) {
 	if errors.Is(err, rancher.ErrBadResponse) {
-		return StatusBadResponse, 200, shortErr(err)
+		return StatusBadResponse, 200, ShortErr(err)
 	}
 	var se *rancher.StatusError
 	if errors.As(err, &se) {
@@ -97,11 +97,11 @@ func classify(err error) (Status, int, string) {
 			return StatusRejected, se.Code, fmt.Sprintf("HTTP %d from Rancher", se.Code)
 		}
 	}
-	return StatusUnavailable, 0, shortErr(err)
+	return StatusUnavailable, 0, ShortErr(err)
 }
 
-// shortErr trims a transport error to something safe and readable.
-func shortErr(err error) string {
+// ShortErr trims a transport error to something safe and readable.
+func ShortErr(err error) string {
 	msg := err.Error()
 	if i := strings.LastIndex(msg, ": "); i >= 0 && strings.Contains(msg, "://") {
 		// Drop the "Post \"https://...\"" prefix and keep the cause.
@@ -194,7 +194,7 @@ func (a *Authenticator) fetchUsers(ctx context.Context, res *Result) {
 			defer wg.Done()
 			u, err := c.Me(ctx, s.Token.Bearer)
 			if err != nil {
-				s.MeError = shortErr(err)
+				s.MeError = ShortErr(err)
 				return
 			}
 			s.User = &u
@@ -263,7 +263,7 @@ func (a *Authenticator) Logout(ctx context.Context, sites []SiteResult) []Logout
 		go func(lr *LogoutResult, c *rancher.Client, bearer string) {
 			defer wg.Done()
 			if err := c.Logout(ctx, bearer); err != nil {
-				lr.Error = "logout: " + shortErr(err)
+				lr.Error = "logout: " + ShortErr(err)
 			} else {
 				lr.LoggedOut = true
 			}
@@ -284,7 +284,7 @@ func (a *Authenticator) Logout(ctx context.Context, sites []SiteResult) []Logout
 				if err != nil {
 					// Not a clear answer; report it and stop checking.
 					if lr.Error == "" {
-						lr.Error = "revocation check: " + shortErr(err)
+						lr.Error = "revocation check: " + ShortErr(err)
 					}
 					return
 				}
