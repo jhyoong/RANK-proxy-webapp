@@ -4,3 +4,4 @@
 /dev/
 # On-site findings: keep out of the public repo
 docs/quick-findings.md
+scratch/*

@@ -25,6 +25,19 @@
   <tr><th>Error</th><td>{{.Check.Error}}</td></tr>
   </tbody>
 </table>
-<p><button disabled>Chat (coming in Plan 3)</button></p>
+{{if eq .Check.Outcome "ready"}}
+<section id="chat" data-chat-url="/clusters/{{esc .Row.Site}}/{{esc .Row.ID}}/chat" data-csrf="{{.Session.CSRF}}" data-context-id="{{.ContextID}}">
+  <div id="log" aria-live="polite"></div>
+  <textarea id="msg" maxlength="{{.MaxMessage}}" rows="3" placeholder="Ask the agent (Ctrl+Enter to send)"></textarea>
+  <div class="actions">
+    <button id="send" type="button">Send</button>
+    <button id="stop" disabled type="button">Stop</button>
+    <a id="new" href="/clusters/{{esc .Row.Site}}/{{esc .Row.ID}}">New conversation</a>
+  </div>
+</section>
+<script src="/static/chat.js" defer></script>
+{{else}}
+<p><button disabled>Chat unavailable: {{.Check.Message}}</button></p>
+{{end}}
 <p><a href="/home">Back to clusters</a></p>
 {{end}}

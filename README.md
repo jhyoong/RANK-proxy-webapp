@@ -32,6 +32,10 @@ Pages:
 - `/clusters/{site}/{id}`: runs the kagent check for one cluster and shows the result (`ready`, `no-access`, `not-installed`, `not-running`, `unreachable`, ...). In the fake, each site has one cluster whose agent card returns 404 (`not-installed`), one 503 (`not-running`) and one that hangs (`unreachable` after the 5s API timeout).
 - `/diagnostics`: the per-site login table plus the raw cluster list with states and conditions.
 
+- Chat panel (on a `ready` cluster page): sends your message to the kagent agent through Rancher and streams the reply (`POST /clusters/{site}/{id}/chat`). One reply at a time per session; a second tab gets "A reply is already running in another tab". In the fake, ready clusters stream a scripted reply at 300ms per event (follow-ups say `turn 2`). Per site, these clusters misbehave in chat: `<site>-stg-20` is silent for 20s before answering (heartbeat pings keep the browser connection alive), `<site>-prod-22` returns a JSON-RPC error, `<site>-stg-23` ends with `state: failed`, `<site>-prod-25` never answers (stops after the 30s `chat.idle_timeout` set in the fake config), `<site>-stg-26` is cut off after `working`. Chat settings are in the `chat:` block of the config; set `chat.log_events: true` to log the shape of each upstream event (never message or agent text).
+
+An ingress in front of the portal must disable response buffering (SSE; for ingress-nginx, `proxy-buffering: "off"`) and set a read timeout above `chat.heartbeat` (default 15s): once the reply stream is open the portal sends a ping every heartbeat. To be safe, set it above `chat.idle_timeout` (default 10m), because no pings flow while the portal waits for Rancher's response headers. On the Rancher leg, the Rancher ingress read timeout (`nginx.ingress.kubernetes.io/proxy-read-timeout`) should be at least `chat.idle_timeout`; otherwise a silent tool call ends as a `cut-off` instead of an `idle-timeout`. `chat.max_duration` (default 30m) caps the whole reply.
+
 With Docker, mount the config and CA files:
 
 ```sh

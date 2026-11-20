@@ -68,6 +68,13 @@ type Fake struct {
 	lastCard   string
 	ssarCalls  int
 	cardCalls  int
+
+	chatCalls     int
+	chatBody      map[string]any
+	chatHeaders   http.Header
+	chatURL       *url.URL
+	chatCancelled int
+	chatTurns     map[string]int // contextId -> messages seen
 }
 
 // Condition is a Rancher status condition. It is defined here, not imported
@@ -83,6 +90,9 @@ type FakeCluster struct {
 	CardBody               string          // overrides the card body
 	CardDelay              time.Duration   // sleep before answering the card
 	SSARStatus             int             // if non-zero, the access review returns this code
+	ChatStatus             int             // if non-zero, the A2A POST returns this code
+	ChatSteps              []Step          // nil -> DefaultChat()
+	ChatHang               bool            // send headers, then block until the request ends
 }
 
 // Handler returns the fake's HTTP handler.
@@ -398,6 +408,10 @@ func (f *Fake) k8sProxy(w http.ResponseWriter, r *http.Request) {
 			"name": "test-agent", "description": "fake agent", "version": "1.0.0",
 			"capabilities": map[string]any{"streaming": true},
 		})
+	case r.Method == http.MethodPost && len(segs) == 12 && segs[11] == "" &&
+		segs[0] == "api" && segs[1] == "v1" && segs[2] == "namespaces" && segs[4] == "services" &&
+		segs[6] == "proxy" && segs[7] == "api" && segs[8] == "a2a":
+		f.chat(w, r, cl, user)
 	default:
 		http.NotFound(w, r)
 	}

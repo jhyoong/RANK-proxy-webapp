@@ -1,5 +1,7 @@
-// Command portal is the kagent chat portal. Plan 1 implements only the
-// multi-site Rancher login flow; see docs/plans/PLAN1.md.
+// Command portal is the kagent chat portal: multi-site Rancher login, the
+// cluster list with a per-cluster kagent check, and a chat panel that
+// streams kagent replies through Rancher as the logged-in user. See the
+// plans in docs/plans.
 package main
 
 import (
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/chat"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/config"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/rancher"
@@ -73,7 +76,8 @@ func run(ctx context.Context, args []string, stdout io.Writer, ready chan<- stri
 	}
 
 	store := session.NewStore(cfg.Session.IdleTimeout, cfg.Session.AbsoluteTimeout, time.Now)
-	handler, err := web.New(cfg, auth.New(clients, cfg.Session.AbsoluteTimeout, log), clusters.New(apiClients, cfg.Kagent, log), store, version, log)
+	handler, err := web.New(cfg, auth.New(clients, cfg.Session.AbsoluteTimeout, log), clusters.New(apiClients, cfg.Kagent, log),
+		chat.New(apiClients, cfg.Kagent, cfg.Chat, log), store, version, log)
 	if err != nil {
 		return err
 	}

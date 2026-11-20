@@ -26,6 +26,9 @@ type Client struct {
 	Name string
 	base string
 	http *http.Client
+	// stream shares http's transport and redirect policy but has no total
+	// Timeout, so a long event stream is not cut off.
+	stream *http.Client
 }
 
 // Token is a Rancher login token. Bearer is opaque and must never be logged
@@ -82,16 +85,14 @@ func NewClient(site config.Site, timeout time.Duration) (*Client, error) {
 	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = tlsCfg
+	// Never follow redirects: a 307/308 would re-send the password
+	// elsewhere, and a 301/302 turns the POST into a confusing GET.
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Client{
-		Name: site.Name,
-		base: site.URL,
-		http: &http.Client{
-			Transport: tr,
-			Timeout:   timeout,
-			// Never follow redirects: a 307/308 would re-send the password
-			// elsewhere, and a 301/302 turns the POST into a confusing GET.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		Name:   site.Name,
+		base:   site.URL,
+		http:   &http.Client{Transport: tr, Timeout: timeout, CheckRedirect: noRedirect},
+		stream: &http.Client{Transport: tr, CheckRedirect: noRedirect},
 	}, nil
 }
 

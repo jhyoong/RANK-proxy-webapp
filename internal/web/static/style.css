@@ -28,3 +28,14 @@ button[disabled] { background: #9ca3af; cursor: not-allowed; }
 .result-disconnected, .result-expired { color: #6b7280; font-weight: 600; }
 .result-no-access, .result-not-installed, .result-not-running, .result-unreachable, .result-denied,
 .result-bad-card, .result-unexpected, .result-check-failed { color: #b91c1c; font-weight: 600; }
+#chat { max-width: 60rem; display: grid; gap: .5rem; margin: 1.5rem 0; }
+#log { background: #fff; border: 1px solid #e5e7eb; border-radius: .25rem; padding: .75rem; min-height: 6rem; max-height: 60vh; overflow-y: auto; }
+#log > div { white-space: pre-wrap; overflow-wrap: anywhere; margin: .25rem 0; }
+#msg { font: inherit; padding: .45rem; border: 1px solid #cbd5e1; border-radius: .25rem; resize: vertical; }
+.you { font-weight: 600; }
+.you::before { content: "You: "; color: #6b7280; }
+.agent::before { content: "Agent: "; color: #6b7280; font-weight: 600; }
+.progress, .tool { color: #6b7280; font-size: .85rem; }
+.progress::before, .tool::before { content: "·· "; }
+.err { color: #b91c1c; }
+.diag { color: #9ca3af; font-size: .75rem; }
