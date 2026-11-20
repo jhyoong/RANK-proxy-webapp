@@ -49,12 +49,14 @@ func writeConfig(t *testing.T, body string) string {
 	return p
 }
 
-const minimal = `
+const sitesOnly = `
 sites:
   - name: site-1
     url: https://r1.example
     ca_file: CAFILE
 `
+
+const minimal = "kagent:\n  agent_name: test-agent\n" + sitesOnly
 
 func TestLoad_Defaults(t *testing.T) {
 	c, err := Load(writeConfig(t, minimal))
@@ -67,6 +69,18 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if len(c.Sites) != 1 || c.Sites[0].Name != "site-1" || c.Sites[0].URL != "https://r1.example" {
 		t.Fatalf("bad sites: %+v", c.Sites)
+	}
+}
+
+func TestLoad_KagentDefaults(t *testing.T) {
+	c, err := Load(writeConfig(t, minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Kagent.Namespace != "kagent" || c.Kagent.Service != "http:kagent-controller:8083" ||
+		c.Kagent.AgentNamespace != "kagent" || c.Kagent.AgentName != "test-agent" ||
+		c.Clusters.CacheTTL != 2*time.Minute || c.API.Timeout != 15*time.Second {
+		t.Fatalf("bad defaults: %+v %+v %+v", c.Kagent, c.Clusters, c.API)
 	}
 }
 
@@ -101,7 +115,7 @@ func TestLoad_TrimsTrailingSlash(t *testing.T) {
 }
 
 func TestLoad_EmptyCAFileAllowed(t *testing.T) {
-	_, err := Load(writeConfig(t, "sites:\n  - name: a\n    url: https://a.example\n"))
+	_, err := Load(writeConfig(t, "kagent:\n  agent_name: test-agent\nsites:\n  - name: a\n    url: https://a.example\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +136,14 @@ func TestLoad_Rejects(t *testing.T) {
 		{"idle > absolute", "session:\n  idle_timeout: 9h\n  absolute_timeout: 8h\n" + minimal, "idle_timeout"},
 		{"half tls", "tls:\n  cert_file: /x.pem\n" + minimal, "tls"},
 		{"unknown key", "bogus: 1\n" + minimal, "bogus"},
+		{"agent_name missing", sitesOnly, "kagent.agent_name is required"},
+		{"agent_name slash", "kagent:\n  agent_name: a/b\n" + sitesOnly, "agent_name"},
+		{"namespace slash", "kagent:\n  agent_name: x\n  namespace: a/b\n" + sitesOnly, "namespace"},
+		{"service query", "kagent:\n  agent_name: x\n  service: a?b\n" + sitesOnly, "service"},
+		{"agent_namespace hash", "kagent:\n  agent_name: x\n  agent_namespace: a#b\n" + sitesOnly, "agent_namespace"},
+		{"negative cache_ttl", "clusters:\n  cache_ttl: -1s\n" + minimal, "cache_ttl"},
+		{"negative api timeout", "api:\n  timeout: -1s\n" + minimal, "api.timeout"},
+		{"unknown clusters key", "clusters:\n  include_local: true\n" + minimal, "include_local"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

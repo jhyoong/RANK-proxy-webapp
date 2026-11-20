@@ -1,4 +1,4 @@
-# Example manifests for the Plan 1 live test (login flow only).
+# Example manifests for the live test (login flow, cluster list, kagent check).
 # Replace every <placeholder>. No secrets live here: the portal holds no
 # credentials of its own; users' Rancher tokens stay in pod memory.
 #
@@ -26,6 +26,17 @@ data:
       idle_timeout: 30m
       absolute_timeout: 8h
     login:
+      timeout: 15s
+    # Where kagent lives in each downstream cluster (URL path segments: no
+    # "/", "?" or "#"). Defaults shown, except agent_name (required: the deployed kagent agent's name).
+    kagent:
+      namespace: kagent
+      service: http:kagent-controller:8083
+      agent_namespace: kagent
+      agent_name: <agent-name>
+    clusters:
+      cache_ttl: 2m
+    api:
       timeout: 15s
     sites:
       - name: <site-1-name>
@@ -58,7 +69,7 @@ metadata:
   namespace: kagent-portal
   labels: {app: portal}
 spec:
-  replicas: 1 # in-memory sessions: must stay at 1 for Plan 1
+  replicas: 1 # in-memory sessions: must stay at 1 (sessions live in memory)
   selector:
     matchLabels: {app: portal}
   template:

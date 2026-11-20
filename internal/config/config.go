@@ -16,11 +16,14 @@ import (
 
 // Config is the whole portal configuration.
 type Config struct {
-	Listen       string        `yaml:"listen"`
-	CookieSecure *bool         `yaml:"cookie_secure"`
-	TLS          TLSConfig     `yaml:"tls"`
-	Session      SessionConfig `yaml:"session"`
-	Login        LoginConfig   `yaml:"login"`
+	Listen       string         `yaml:"listen"`
+	CookieSecure *bool          `yaml:"cookie_secure"`
+	TLS          TLSConfig      `yaml:"tls"`
+	Session      SessionConfig  `yaml:"session"`
+	Login        LoginConfig    `yaml:"login"`
+	Kagent       KagentConfig   `yaml:"kagent"`
+	Clusters     ClustersConfig `yaml:"clusters"`
+	API          APIConfig      `yaml:"api"`
 	// Sites are tried in order at login; Sites[0] is "site 1".
 	Sites []Site `yaml:"sites"`
 }
@@ -40,6 +43,27 @@ type SessionConfig struct {
 // LoginConfig holds settings for calls to Rancher.
 type LoginConfig struct {
 	// Timeout applies to each request to a Rancher site.
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+// KagentConfig locates kagent and its agent inside each downstream cluster.
+// All four values become URL path segments.
+type KagentConfig struct {
+	Namespace      string `yaml:"namespace"`
+	Service        string `yaml:"service"`
+	AgentNamespace string `yaml:"agent_namespace"`
+	AgentName      string `yaml:"agent_name"`
+}
+
+// ClustersConfig holds cluster list settings.
+type ClustersConfig struct {
+	// CacheTTL is how long a session's cluster list is cached.
+	CacheTTL time.Duration `yaml:"cache_ttl"`
+}
+
+// APIConfig holds settings for Rancher/cluster API calls after login.
+type APIConfig struct {
+	// Timeout applies to each such request.
 	Timeout time.Duration `yaml:"timeout"`
 }
 
@@ -88,6 +112,25 @@ func (c *Config) applyDefaults() {
 	if c.Login.Timeout == 0 {
 		c.Login.Timeout = 15 * time.Second
 	}
+	k := &c.Kagent
+	for _, f := range []struct {
+		v *string
+		d string
+	}{
+		{&k.Namespace, "kagent"},
+		{&k.Service, "http:kagent-controller:8083"},
+		{&k.AgentNamespace, "kagent"},
+	} {
+		if *f.v == "" {
+			*f.v = f.d
+		}
+	}
+	if c.Clusters.CacheTTL == 0 {
+		c.Clusters.CacheTTL = 2 * time.Minute
+	}
+	if c.API.Timeout == 0 {
+		c.API.Timeout = 15 * time.Second
+	}
 }
 
 func (c *Config) validate() error {
@@ -102,6 +145,22 @@ func (c *Config) validate() error {
 	}
 	if c.Session.IdleTimeout > c.Session.AbsoluteTimeout {
 		return errors.New("session: idle_timeout must not exceed absolute_timeout")
+	}
+	if c.Clusters.CacheTTL < 0 {
+		return errors.New("clusters.cache_ttl must be positive")
+	}
+	if c.API.Timeout < 0 {
+		return errors.New("api.timeout must be positive")
+	}
+	for _, f := range []struct{ name, v string }{
+		{"namespace", c.Kagent.Namespace},
+		{"service", c.Kagent.Service},
+		{"agent_namespace", c.Kagent.AgentNamespace},
+		{"agent_name", c.Kagent.AgentName},
+	} {
+		if strings.ContainsAny(f.v, "/?#") {
+			return fmt.Errorf("kagent.%s %q must not contain '/', '?' or '#'", f.name, f.v)
+		}
 	}
 	seen := map[string]bool{}
 	for i := range c.Sites {
@@ -133,6 +192,9 @@ func (c *Config) validate() error {
 				return fmt.Errorf("sites[%d] %s: ca_file %s contains no PEM certificate", i, s.Name, s.CAFile)
 			}
 		}
+	}
+	if c.Kagent.AgentName == "" {
+		return errors.New("kagent.agent_name is required: set it to the name of the deployed kagent agent")
 	}
 	return nil
 }

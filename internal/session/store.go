@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 )
 
 // Session is one logged-in user. It holds Rancher tokens inside Sites.
@@ -19,6 +20,9 @@ type Session struct {
 	Sites               []auth.SiteResult
 	Warnings            []string
 	Created, LastSeen   time.Time
+	// Clusters is the cached cluster list. The pointer is shared and the
+	// Listing is never mutated; SetClusters replaces it.
+	Clusters *clusters.Listing
 }
 
 // Store holds sessions in memory.
@@ -82,6 +86,20 @@ func (s *Store) Get(id string) (*Session, bool) {
 	}
 	sess.LastSeen = now
 	return clone(sess), true
+}
+
+// SetClusters replaces the session's cached cluster list. It returns false if
+// the session is gone or expired.
+func (s *Store) SetClusters(id string, l *clusters.Listing) bool {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.m[id]
+	if !ok || s.expired(sess, now) {
+		return false
+	}
+	sess.Clusters = l
+	return true
 }
 
 // Delete removes the session and returns it so its tokens can be revoked.

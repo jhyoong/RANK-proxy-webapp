@@ -56,6 +56,16 @@ type StatusError struct {
 
 func (e *StatusError) Error() string { return fmt.Sprintf("rancher returned HTTP %d", e.Code) }
 
+// BadResponseError is ErrBadResponse for a 2xx body that failed to decode; it
+// carries the HTTP status so callers can report it.
+type BadResponseError struct {
+	Code int
+	msg  string
+}
+
+func (e *BadResponseError) Error() string        { return ErrBadResponse.Error() + ": " + e.msg }
+func (e *BadResponseError) Is(target error) bool { return target == ErrBadResponse }
+
 // NewClient builds a client for site. timeout bounds each request.
 func NewClient(site config.Site, timeout time.Duration) (*Client, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -124,7 +134,7 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, bear
 		return nil
 	}
 	if err := json.NewDecoder(lr).Decode(out); err != nil {
-		return fmt.Errorf("%w: decode %s: %v", ErrBadResponse, path, err)
+		return &BadResponseError{Code: resp.StatusCode, msg: fmt.Sprintf("decode %s: %v", path, err)}
 	}
 	return nil
 }

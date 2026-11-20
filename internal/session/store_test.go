@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 )
 
 type clock struct {
@@ -134,4 +136,20 @@ func TestConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestSetClusters(t *testing.T) {
+	s := NewStore(time.Minute, time.Hour, newClock().now)
+	a := s.Create(Session{Username: "jdoe"})
+	l := &clusters.Listing{Rows: []clusters.Row{{Site: "site-1"}}}
+	if !s.SetClusters(a.ID, l) {
+		t.Fatal("SetClusters false for live session")
+	}
+	got, _ := s.Get(a.ID)
+	if got.Clusters != l {
+		t.Fatal("listing not visible on next Get")
+	}
+	if s.SetClusters("nope", l) {
+		t.Fatal("SetClusters true for unknown id")
+	}
 }
