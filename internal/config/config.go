@@ -24,6 +24,7 @@ type Config struct {
 	Kagent       KagentConfig   `yaml:"kagent"`
 	Clusters     ClustersConfig `yaml:"clusters"`
 	API          APIConfig      `yaml:"api"`
+	Chat         ChatConfig     `yaml:"chat"`
 	// Sites are tried in order at login; Sites[0] is "site 1".
 	Sites []Site `yaml:"sites"`
 }
@@ -65,6 +66,20 @@ type ClustersConfig struct {
 type APIConfig struct {
 	// Timeout applies to each such request.
 	Timeout time.Duration `yaml:"timeout"`
+}
+
+// ChatConfig holds settings for chat replies streamed from kagent.
+type ChatConfig struct {
+	// MaxDuration is the total cap per reply.
+	MaxDuration time.Duration `yaml:"max_duration"`
+	// IdleTimeout caps the silence between upstream events.
+	IdleTimeout time.Duration `yaml:"idle_timeout"`
+	// MaxMessageBytes is the longest message a user can send.
+	MaxMessageBytes int `yaml:"max_message_bytes"`
+	// Heartbeat is how often a comment line goes to the browser while upstream is silent.
+	Heartbeat time.Duration `yaml:"heartbeat"`
+	// LogEvents logs the shape (never content) of every upstream event.
+	LogEvents bool `yaml:"log_events"`
 }
 
 // Site is one Rancher site.
@@ -131,6 +146,18 @@ func (c *Config) applyDefaults() {
 	if c.API.Timeout == 0 {
 		c.API.Timeout = 15 * time.Second
 	}
+	if c.Chat.MaxDuration == 0 {
+		c.Chat.MaxDuration = 30 * time.Minute
+	}
+	if c.Chat.IdleTimeout == 0 {
+		c.Chat.IdleTimeout = 10 * time.Minute
+	}
+	if c.Chat.MaxMessageBytes == 0 {
+		c.Chat.MaxMessageBytes = 8192
+	}
+	if c.Chat.Heartbeat == 0 {
+		c.Chat.Heartbeat = 15 * time.Second
+	}
 }
 
 func (c *Config) validate() error {
@@ -151,6 +178,21 @@ func (c *Config) validate() error {
 	}
 	if c.API.Timeout < 0 {
 		return errors.New("api.timeout must be positive")
+	}
+	if c.Chat.MaxDuration < 0 {
+		return errors.New("chat.max_duration must be positive")
+	}
+	if c.Chat.IdleTimeout < 0 {
+		return errors.New("chat.idle_timeout must be positive")
+	}
+	if c.Chat.Heartbeat < 0 {
+		return errors.New("chat.heartbeat must be positive")
+	}
+	if c.Chat.MaxMessageBytes < 1 || c.Chat.MaxMessageBytes > 65536 {
+		return errors.New("chat.max_message_bytes must be between 1 and 65536")
+	}
+	if c.Chat.IdleTimeout > c.Chat.MaxDuration {
+		return errors.New("chat: idle_timeout must not exceed max_duration")
 	}
 	for _, f := range []struct{ name, v string }{
 		{"namespace", c.Kagent.Namespace},

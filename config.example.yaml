@@ -56,3 +56,11 @@ clusters:
 api:
   # Timeout for each cluster list / check request to Rancher.
   timeout: 15s
+
+chat:
+  max_duration: 30m        # total cap per reply; matches kagent's streaming timeout on site (Helm default is 10m)
+  idle_timeout: 10m        # cap on silence between upstream events (kagent sends no heartbeats);
+                           # an ingress without timeout annotations cuts silence at 60s first
+  max_message_bytes: 8192  # longest message a user can send (1 to 65536)
+  heartbeat: 15s           # comment line sent to the browser while upstream is silent
+  log_events: false        # log the shape (never content) of every upstream event; on for live tests

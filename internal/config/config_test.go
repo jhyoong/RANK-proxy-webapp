@@ -72,6 +72,17 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 }
 
+func TestLoad_ChatDefaults(t *testing.T) {
+	c, err := Load(writeConfig(t, minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ChatConfig{MaxDuration: 30 * time.Minute, IdleTimeout: 10 * time.Minute, MaxMessageBytes: 8192, Heartbeat: 15 * time.Second}
+	if c.Chat != want {
+		t.Fatalf("chat = %+v, want %+v", c.Chat, want)
+	}
+}
+
 func TestLoad_KagentDefaults(t *testing.T) {
 	c, err := Load(writeConfig(t, minimal))
 	if err != nil {
@@ -143,6 +154,13 @@ func TestLoad_Rejects(t *testing.T) {
 		{"agent_namespace hash", "kagent:\n  agent_name: x\n  agent_namespace: a#b\n" + sitesOnly, "agent_namespace"},
 		{"negative cache_ttl", "clusters:\n  cache_ttl: -1s\n" + minimal, "cache_ttl"},
 		{"negative api timeout", "api:\n  timeout: -1s\n" + minimal, "api.timeout"},
+		{"negative chat max_duration", "chat:\n  max_duration: -1s\n" + minimal, "chat.max_duration"},
+		{"negative chat idle_timeout", "chat:\n  idle_timeout: -1s\n" + minimal, "chat.idle_timeout"},
+		{"negative chat heartbeat", "chat:\n  heartbeat: -1s\n" + minimal, "chat.heartbeat"},
+		{"chat message too big", "chat:\n  max_message_bytes: 70000\n" + minimal, "max_message_bytes"},
+		{"chat message negative", "chat:\n  max_message_bytes: -1\n" + minimal, "max_message_bytes"},
+		{"chat idle > max", "chat:\n  idle_timeout: 40m\n  max_duration: 30m\n" + minimal, "idle_timeout"},
+		{"unknown chat key", "chat:\n  mode: send\n" + minimal, "mode"},
 		{"unknown clusters key", "clusters:\n  include_local: true\n" + minimal, "include_local"},
 	}
 	for _, tc := range cases {
