@@ -32,6 +32,10 @@ Pages:
 - `/clusters/{site}/{id}`: runs the kagent check for one cluster and shows the result (`ready`, `no-access`, `not-installed`, `not-running`, `unreachable`, ...). In the fake, each site has one cluster whose agent card returns 404 (`not-installed`), one 503 (`not-running`) and one that hangs (`unreachable` after the 5s API timeout).
 - `/diagnostics`: the per-site login table plus the raw cluster list with states and conditions.
 
+- Chat panel (on a `ready` cluster page): sends your message to the kagent agent through Rancher and streams the reply (`POST /clusters/{site}/{id}/chat`). One reply at a time per session; a second tab gets "A reply is already running in another tab". In the fake, ready clusters stream a scripted reply at 300ms per event (follow-ups say `turn 2`). Per site, these clusters misbehave in chat: `<site>-stg-20` is silent for 20s before answering (heartbeat pings keep the browser connection alive), `<site>-prod-22` returns a JSON-RPC error, `<site>-stg-23` ends with `state: failed`, `<site>-prod-25` never answers (stops after the 30s `chat.idle_timeout` set in the fake config), `<site>-stg-26` is cut off after `working`. Chat settings are in the `chat:` block of the config; set `chat.log_events: true` to log the shape of each upstream event (never message or agent text).
+
+Any ingress or proxy in front of the portal must disable response buffering (SSE) and allow reads of at least `chat.max_duration` (for ingress-nginx: `proxy-buffering: "off"` and a `proxy-read-timeout` of at least that long). The kagent controller sends no heartbeats, so keep `chat.idle_timeout` below the ingress's read timeout.
+
 With Docker, mount the config and CA files:
 
 ```sh

@@ -38,6 +38,14 @@ data:
       cache_ttl: 2m
     api:
       timeout: 15s
+    # Chat with the kagent agent. log_events logs the shape (never the
+    # content) of every upstream event: keep it on for the live test.
+    chat:
+      max_duration: 30m
+      idle_timeout: 10m
+      max_message_bytes: 8192
+      heartbeat: 15s
+      log_events: true
     sites:
       - name: <site-1-name>
         url: https://<rancher-site-1-host>
