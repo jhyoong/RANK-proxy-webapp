@@ -28,12 +28,12 @@ data:
     login:
       timeout: 15s
     # Where kagent lives in each downstream cluster (URL path segments: no
-    # "/", "?" or "#"). Defaults shown. agent_name must match the deployed kagent agent.
+    # "/", "?" or "#"). Defaults shown, except agent_name (required: the deployed kagent agent's name).
     kagent:
       namespace: kagent
       service: http:kagent-controller:8083
       agent_namespace: kagent
-      agent_name: rps-agent
+      agent_name: <agent-name>
     clusters:
       cache_ttl: 2m
     api:

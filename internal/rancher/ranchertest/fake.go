@@ -395,7 +395,7 @@ func (f *Fake) k8sProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"name": "rps-agent", "description": "fake agent", "version": "1.0.0",
+			"name": "test-agent", "description": "fake agent", "version": "1.0.0",
 			"capabilities": map[string]any{"streaming": true},
 		})
 	default:

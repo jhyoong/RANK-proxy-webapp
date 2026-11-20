@@ -14,7 +14,7 @@ import (
 	"github.com/jhyoong/RANK-proxy-webapp/internal/rancher/ranchertest"
 )
 
-var kagentCfg = config.KagentConfig{Namespace: "kagent", Service: "http:kagent-controller:8083", AgentNamespace: "kagent", AgentName: "rps-agent"}
+var kagentCfg = config.KagentConfig{Namespace: "kagent", Service: "http:kagent-controller:8083", AgentNamespace: "kagent", AgentName: "test-agent"}
 
 func checkSetup(t *testing.T, timeout time.Duration, c ranchertest.FakeCluster) (env, *ranchertest.Fake, clusters.Row) {
 	t.Helper()

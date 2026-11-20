@@ -238,18 +238,18 @@ func TestCanI_UnknownCluster(t *testing.T) {
 func TestAgentCard_OK(t *testing.T) {
 	f := newFake()
 	c, bearer := accessSetup(t, f)
-	card, err := c.AgentCard(context.Background(), bearer, "c-abc12", "kagent", "http:kagent-controller:8083", "kagent", "rps-agent")
+	card, err := c.AgentCard(context.Background(), bearer, "c-abc12", "kagent", "http:kagent-controller:8083", "kagent", "test-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if card.Name != "rps-agent" || card.Description == "" || card.Version == "" || !card.Streaming {
+	if card.Name != "test-agent" || card.Description == "" || card.Version == "" || !card.Streaming {
 		t.Fatalf("card = %+v", card)
 	}
-	want := "/k8s/clusters/c-abc12/api/v1/namespaces/kagent/services/http:kagent-controller:8083/proxy/api/a2a/kagent/rps-agent/.well-known/agent-card.json"
+	want := "/k8s/clusters/c-abc12/api/v1/namespaces/kagent/services/http:kagent-controller:8083/proxy/api/a2a/kagent/test-agent/.well-known/agent-card.json"
 	if got := f.LastCardPath(); got != want {
 		t.Fatalf("path = %q\nwant   %q", got, want)
 	}
-	if _, err := c.AgentCard(context.Background(), "bogus", "c-abc12", "kagent", "http:kagent-controller:8083", "kagent", "rps-agent"); err == nil {
+	if _, err := c.AgentCard(context.Background(), "bogus", "c-abc12", "kagent", "http:kagent-controller:8083", "kagent", "test-agent"); err == nil {
 		t.Fatal("unknown bearer must fail")
 	}
 }

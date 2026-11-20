@@ -41,12 +41,13 @@ sites:
     ca_file: /etc/portal/ca/site-3.pem
 
 # Where kagent lives in each downstream cluster. These values become URL path
-# segments, so none may contain "/", "?" or "#". Defaults shown.
+# segments, so none may contain "/", "?" or "#". Defaults shown, except
+# agent_name, which is required: the name of the deployed kagent agent.
 kagent:
   namespace: kagent
   service: http:kagent-controller:8083
   agent_namespace: kagent
-  agent_name: rps-agent
+  agent_name: <agent-name>
 
 clusters:
   # How long a session's cluster list is cached.

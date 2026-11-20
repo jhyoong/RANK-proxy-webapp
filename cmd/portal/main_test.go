@@ -16,7 +16,7 @@ import (
 func TestRun_StartsAndServesHealthz(t *testing.T) {
 	u, ca := ranchertest.NewTLS(t, &ranchertest.Fake{})
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	cfg := "listen: 127.0.0.1:0\nsites:\n  - name: site-1\n    url: " + u + "\n    ca_file: " + ca + "\n"
+	cfg := "listen: 127.0.0.1:0\nkagent:\n  agent_name: test-agent\nsites:\n  - name: site-1\n    url: " + u + "\n    ca_file: " + ca + "\n"
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}

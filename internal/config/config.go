@@ -120,7 +120,6 @@ func (c *Config) applyDefaults() {
 		{&k.Namespace, "kagent"},
 		{&k.Service, "http:kagent-controller:8083"},
 		{&k.AgentNamespace, "kagent"},
-		{&k.AgentName, "rps-agent"},
 	} {
 		if *f.v == "" {
 			*f.v = f.d
@@ -193,6 +192,9 @@ func (c *Config) validate() error {
 				return fmt.Errorf("sites[%d] %s: ca_file %s contains no PEM certificate", i, s.Name, s.CAFile)
 			}
 		}
+	}
+	if c.Kagent.AgentName == "" {
+		return errors.New("kagent.agent_name is required: set it to the name of the deployed kagent agent")
 	}
 	return nil
 }

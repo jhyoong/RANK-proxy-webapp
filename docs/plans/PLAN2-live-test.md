@@ -5,7 +5,7 @@ Run this inside the target network with the Plan 2 image (`v0.2.0`), then type u
 ## Before you start
 
 - [ ] **Image.** Move the image in using the README's `skopeo` steps. Record the digest. Deploy by digest.
-- [ ] **Config.** In the ConfigMap, confirm `kagent.agent_name` is `rps-agent` (it must match the deployed kagent agent). Defaults are fine for `clusters.cache_ttl` (2m) and `api.timeout` (15s).
+- [ ] **Config.** In the ConfigMap, set `kagent.agent_name` to the deployed kagent agent's name (the portal will not start without it). Defaults are fine for `clusters.cache_ttl` (2m) and `api.timeout` (15s).
 - [ ] **Rancher UI.** Open the Rancher UI for each site in another tab. You need each site's cluster count and which clusters show as disconnected.
 - [ ] **Known clusters.** Note one cluster that runs kagent, and (if any) one without kagent or with kagent down.
 - [ ] Deploy: `kubectl apply -f deploy/portal.yaml`, then `kubectl -n kagent-portal port-forward svc/portal 8080:80`, then open `http://localhost:8080`.
