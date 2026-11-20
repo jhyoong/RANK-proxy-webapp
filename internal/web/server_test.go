@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -9,10 +10,13 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jhyoong/RANK-proxy-webapp/internal/a2a"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/chat"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/config"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/rancher"
@@ -21,7 +25,7 @@ import (
 
 const principal = "activedirectory_user://CN=Test User (Admin), OU=Example Admins,DC=example,DC=com"
 
-const wantCSP = "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+const wantCSP = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 
 type stubAuthn struct {
 	result      auth.Result
@@ -92,27 +96,30 @@ func defaultListing() *clusters.Listing {
 
 type harness struct {
 	h     http.Handler
+	srv   *server
 	stub  *stubAuthn
 	store *session.Store
 	cl    *stubClusters
+	ch    *stubChat
 	clock *time.Time
 }
 
 func newHarness(t *testing.T, secure bool) harness {
 	t.Helper()
 	cfg := &config.Config{CookieSecure: &secure, Sites: []config.Site{{Name: "site-1"}, {Name: "site-2"}, {Name: "site-3"}},
-		Clusters: config.ClustersConfig{CacheTTL: 2 * time.Minute}}
+		Clusters: config.ClustersConfig{CacheTTL: 2 * time.Minute}, Chat: config.ChatConfig{MaxMessageBytes: 8192}}
 	stub := &stubAuthn{result: okResult()}
 	clock := time.Now()
 	hs := &harness{}
 	cl := &stubClusters{listing: defaultListing(), now: func() time.Time { return *hs.clock }}
 	store := session.NewStore(30*time.Minute, 8*time.Hour, time.Now)
-	srv, h, err := build(cfg, stub, cl, store, "v-test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ch := &stubChat{started: make(chan struct{}, 8), ctxDone: make(chan struct{}, 8)}
+	srv, h, err := build(cfg, stub, cl, ch, store, "v-test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv.now = func() time.Time { return *hs.clock }
-	hs.h, hs.stub, hs.store, hs.cl, hs.clock = h, stub, store, cl, &clock
+	hs.h, hs.srv, hs.stub, hs.store, hs.cl, hs.ch, hs.clock = h, srv, stub, store, cl, ch, &clock
 	return *hs
 }
 
@@ -358,7 +365,7 @@ func TestLogout_NoSession(t *testing.T) {
 func TestSecurityHeaders(t *testing.T) {
 	hs := newHarness(t, true)
 	c := hs.login(t)
-	for _, p := range []string{"/", "/home", "/diagnostics", "/healthz", "/version", "/static/style.css", "/nope"} {
+	for _, p := range []string{"/", "/home", "/diagnostics", "/healthz", "/version", "/static/style.css", "/static/chat.js", "/nope"} {
 		rr := hs.do("GET", p, nil, c)
 		h := rr.Header()
 		if h.Get("Content-Security-Policy") != wantCSP || h.Get("Cache-Control") != "no-store" ||
@@ -372,6 +379,9 @@ func TestStaticAndHealth(t *testing.T) {
 	hs := newHarness(t, true)
 	if rr := hs.do("GET", "/static/style.css", nil, nil); rr.Code != 200 || !strings.HasPrefix(rr.Header().Get("Content-Type"), "text/css") {
 		t.Fatalf("css %d %q", rr.Code, rr.Header().Get("Content-Type"))
+	}
+	if rr := hs.do("GET", "/static/chat.js", nil, nil); rr.Code != 200 || !strings.HasPrefix(rr.Header().Get("Content-Type"), "text/javascript") {
+		t.Fatalf("js %d %q", rr.Code, rr.Header().Get("Content-Type"))
 	}
 	if rr := hs.do("GET", "/healthz", nil, nil); rr.Code != 200 {
 		t.Fatal("healthz")
@@ -501,7 +511,7 @@ func TestCluster_Ready(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("status %d", rr.Code)
 	}
-	for _, want := range []string{"kagent is ready", "result-ready", "k8s-agent", "prod-east", "<button disabled>Chat (coming in Plan 3)</button>", `href="/home"`, "<th>Outcome</th><td>ready</td>"} {
+	for _, want := range []string{"kagent is ready", "result-ready", "k8s-agent", "prod-east", `id="chat"`, `href="/home"`, "<th>Outcome</th><td>ready</td>"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("cluster page missing %q", want)
 		}
@@ -565,5 +575,325 @@ func TestCluster_StaleCacheRelists(t *testing.T) {
 	rr := hs.do("GET", "/clusters/site-1/c-abc12", nil, c)
 	if rr.Code != 200 || hs.cl.listCalls != 2 {
 		t.Fatalf("status %d list calls %d", rr.Code, hs.cl.listCalls)
+	}
+}
+
+type chatCall struct {
+	row                        clusters.Row
+	principal, text, contextID string
+}
+
+// stubChat records calls and emits script. A text of "block" waits for the
+// request context to end before emitting done.
+type stubChat struct {
+	mu      sync.Mutex
+	calls   []chatCall
+	script  []chat.Out
+	started chan struct{}
+	ctxDone chan struct{}
+}
+
+func (s *stubChat) Send(ctx context.Context, _ []auth.SiteResult, row clusters.Row, principal, text, contextID string, emit func(chat.Out)) {
+	s.mu.Lock()
+	s.calls = append(s.calls, chatCall{row, principal, text, contextID})
+	script := s.script
+	s.mu.Unlock()
+	s.started <- struct{}{}
+	for _, o := range script {
+		emit(o)
+	}
+	if text == "block" {
+		<-ctx.Done()
+		s.ctxDone <- struct{}{}
+	}
+	emit(chat.Out{Type: "done", Data: chat.Done{State: "completed", Events: len(script)}})
+}
+
+func (s *stubChat) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.calls)
+}
+
+const testCtxID = "123e4567-e89b-42d3-a456-426614174000"
+
+func chatBody(text, ctxID string) string {
+	b, _ := json.Marshal(map[string]string{"text": text, "context_id": ctxID})
+	return string(b)
+}
+
+func (hs harness) csrfOf(t *testing.T, c *http.Cookie) string {
+	t.Helper()
+	sess, ok := hs.store.Get(c.Value)
+	if !ok {
+		t.Fatal("no session")
+	}
+	return sess.CSRF
+}
+
+func (hs harness) postChat(path, body, ctype, csrf string, c *http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	if ctype != "" {
+		req.Header.Set("Content-Type", ctype)
+	}
+	if csrf != "" {
+		req.Header.Set("X-CSRF-Token", csrf)
+	}
+	if c != nil {
+		req.AddCookie(c)
+	}
+	rr := httptest.NewRecorder()
+	hs.h.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestChat_StreamsEvents(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.ch.script = []chat.Out{{Type: "progress", Data: chat.Progress{Text: "thinking"}}, {Type: "answer", Data: chat.Answer{Text: "hello"}}}
+	c := hs.login(t)
+	rr := hs.postChat("/clusters/site-1/c-abc12/chat", chatBody("why?", testCtxID), "application/json; charset=utf-8", hs.csrfOf(t, c), c)
+	if rr.Code != 200 || rr.Header().Get("Content-Type") != "text/event-stream" || rr.Header().Get("X-Accel-Buffering") != "no" {
+		t.Fatalf("status %d headers %v", rr.Code, rr.Header())
+	}
+	if rr.Header().Get("Content-Security-Policy") != wantCSP {
+		t.Fatal("security headers missing on stream")
+	}
+	body := rr.Body.String()
+	a, d := strings.Index(body, "event: answer\n"), strings.Index(body, "event: done\n")
+	if a < 0 || d < a || !strings.Contains(body, `data: {"text":"hello"}`) {
+		t.Fatalf("body %q", body)
+	}
+	if len(hs.ch.calls) != 1 {
+		t.Fatalf("calls %d", len(hs.ch.calls))
+	}
+	call := hs.ch.calls[0]
+	if call.row.Site != "site-1" || call.row.ID != "c-abc12" || call.principal != principal || call.text != "why?" || call.contextID != testCtxID {
+		t.Fatalf("call %+v", call)
+	}
+}
+
+func TestChat_Rejects(t *testing.T) {
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	csrf := hs.csrfOf(t, c)
+	good := chatBody("hi", testCtxID)
+	const p = "/clusters/site-1/c-abc12/chat"
+	for _, tc := range []struct {
+		name, path, body, ctype, csrf string
+		cookie                        *http.Cookie
+		want                          int
+	}{
+		{"no cookie", p, good, "application/json", csrf, nil, 401},
+		{"bad cookie", p, good, "application/json", csrf, &http.Cookie{Name: "portal_session", Value: "bogus"}, 401},
+		{"bad csrf", p, good, "application/json", "wrong", c, 403},
+		{"no csrf", p, good, "application/json", "", c, 403},
+		{"text/plain", p, good, "text/plain", csrf, c, 415},
+		{"no content type", p, good, "", csrf, c, 415},
+		{"text too long", p, chatBody(strings.Repeat("x", 8193), testCtxID), "application/json", csrf, c, 413},
+		{"body too large", p, chatBody(strings.Repeat("x", 9300), testCtxID), "application/json", csrf, c, 413},
+		{"whitespace", p, chatBody(" \n\t ", testCtxID), "application/json", csrf, c, 400},
+		{"bad context id", p, chatBody("hi", "abc"), "application/json", csrf, c, 400},
+		{"bad json", p, `{"text":`, "application/json", csrf, c, 400},
+		{"unknown cluster", "/clusters/site-1/c-nope/chat", good, "application/json", csrf, c, 404},
+		{"local", "/clusters/site-1/local/chat", good, "application/json", csrf, c, 404},
+		{"unknown site", "/clusters/nosite/c-abc12/chat", good, "application/json", csrf, c, 404},
+		{"disconnected", "/clusters/site-1/c-down1/chat", good, "application/json", csrf, c, 409},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if rr := hs.postChat(tc.path, tc.body, tc.ctype, tc.csrf, tc.cookie); rr.Code != tc.want {
+				t.Fatalf("status %d, want %d", rr.Code, tc.want)
+			}
+		})
+	}
+	if n := hs.ch.count(); n != 0 {
+		t.Fatalf("Send called %d times", n)
+	}
+}
+
+// liveChat posts to a real server so the response streams.
+func liveChat(t *testing.T, ctx context.Context, base string, hs harness, c *http.Cookie, text string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, "POST", base+"/clusters/site-1/c-abc12/chat", strings.NewReader(chatBody(text, testCtxID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", hs.csrfOf(t, c))
+	req.AddCookie(c)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func waitFor(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func (hs harness) waitIdle(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		hs.srv.mu.Lock()
+		n := len(hs.srv.active)
+		hs.srv.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reply slot not freed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestChat_OneReplyPerSession(t *testing.T) {
+	hs := newHarness(t, true)
+	ts := httptest.NewServer(hs.h)
+	defer ts.Close()
+	c1, c2 := hs.login(t), hs.login(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := liveChat(t, ctx, ts.URL, hs, c1, "block")
+	defer first.Body.Close()
+	if first.StatusCode != 200 {
+		t.Fatalf("first %d", first.StatusCode)
+	}
+	waitFor(t, hs.ch.started, "first Send")
+
+	second := liveChat(t, context.Background(), ts.URL, hs, c1, "hi")
+	second.Body.Close()
+	if second.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second %d, want 429", second.StatusCode)
+	}
+	other := liveChat(t, context.Background(), ts.URL, hs, c2, "hi")
+	b, _ := io.ReadAll(other.Body)
+	other.Body.Close()
+	if other.StatusCode != 200 || !strings.Contains(string(b), "event: done") {
+		t.Fatalf("other session %d %q", other.StatusCode, b)
+	}
+	if n := hs.ch.count(); n != 2 {
+		t.Fatalf("Send calls %d, want 2", n)
+	}
+}
+
+func TestChat_CancelFreesSlot(t *testing.T) {
+	hs := newHarness(t, true)
+	ts := httptest.NewServer(hs.h)
+	defer ts.Close()
+	c := hs.login(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	first := liveChat(t, ctx, ts.URL, hs, c, "block")
+	waitFor(t, hs.ch.started, "first Send")
+	cancel()
+	first.Body.Close()
+	waitFor(t, hs.ch.ctxDone, "Send to see ctx.Done()")
+	hs.waitIdle(t)
+
+	next := liveChat(t, context.Background(), ts.URL, hs, c, "hi")
+	next.Body.Close()
+	if next.StatusCode != 200 {
+		t.Fatalf("after cancel %d, want 200", next.StatusCode)
+	}
+}
+
+func TestChat_401KeepsSession(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.ch.script = []chat.Out{{Type: "error", Data: chat.Error{Message: "Your session on site-1 has expired: log in again"}}}
+	c := hs.login(t)
+	rr := hs.postChat("/clusters/site-1/c-abc12/chat", chatBody("hi", testCtxID), "application/json", hs.csrfOf(t, c), c)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "has expired") {
+		t.Fatalf("status %d body %q", rr.Code, rr.Body.String())
+	}
+	if rr := hs.do("GET", "/home", nil, c); rr.Code != 200 {
+		t.Fatalf("home after expired chat: %d", rr.Code)
+	}
+}
+
+func TestWriteEvent_FramingSafe(t *testing.T) {
+	var b strings.Builder
+	if err := writeEvent(&b, chat.Out{Type: "answer", Data: chat.Answer{Text: "a\n\nevent: done\n<script>"}}); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.HasPrefix(out, "event: answer\ndata: ") || !strings.HasSuffix(out, "\n\n") {
+		t.Fatalf("framing %q", out)
+	}
+	if strings.Count(out, "data:") != 1 || strings.Count(out, "\n") != 3 || strings.Contains(out, "<") {
+		t.Fatalf("unsafe output %q", out)
+	}
+	b.Reset()
+	if err := writeEvent(&b, chat.Out{Type: "ping"}); err != nil || b.String() != ": ping\n\n" {
+		t.Fatalf("ping %q %v", b.String(), err)
+	}
+}
+
+var (
+	ctxIDRe        = regexp.MustCompile(`data-context-id="([^"]+)"`)
+	dataCSRFRe     = regexp.MustCompile(`data-csrf="([^"]+)"`)
+	inlineScriptRe = regexp.MustCompile(`<script[^>]*>[^<]+</script>`)
+)
+
+func TestCluster_ReadyHasChatPanel(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.cl.check = clusters.CheckResult{Outcome: clusters.OutcomeReady, Message: "kagent is ready"}
+	c := hs.login(t)
+	var ids []string
+	for i := 0; i < 2; i++ {
+		body := hs.do("GET", "/clusters/site-1/c-abc12", nil, c).Body.String()
+		for _, want := range []string{`id="chat"`, `data-chat-url="/clusters/site-1/c-abc12/chat"`, `id="log"`, `<textarea id="msg" maxlength="8192"`,
+			`id="send"`, `id="stop" disabled`, `id="new" href="/clusters/site-1/c-abc12"`, `<script src="/static/chat.js" defer></script>`, "chat test"} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("page missing %q", want)
+			}
+		}
+		if m := dataCSRFRe.FindStringSubmatch(body); m == nil || m[1] != hs.csrfOf(t, c) {
+			t.Fatalf("data-csrf %v", m)
+		}
+		m := ctxIDRe.FindStringSubmatch(body)
+		if m == nil || !a2a.ValidUUID(m[1]) {
+			t.Fatalf("context id %v", m)
+		}
+		ids = append(ids, m[1])
+		if inlineScriptRe.MatchString(body) {
+			t.Fatal("inline script content")
+		}
+		if strings.Contains(body, "Chat unavailable") {
+			t.Fatal("ready page shows unavailable button")
+		}
+	}
+	if ids[0] == ids[1] {
+		t.Fatal("context id reused across loads")
+	}
+}
+
+func TestCluster_NotReadyNoChat(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.cl.check = clusters.CheckResult{Outcome: clusters.OutcomeNotRunning, Message: "kagent is installed but not running"}
+	c := hs.login(t)
+	body := hs.do("GET", "/clusters/site-1/c-abc12", nil, c).Body.String()
+	if !strings.Contains(body, "<button disabled>Chat unavailable: kagent is installed but not running</button>") {
+		t.Fatal("unavailable button missing")
+	}
+	if strings.Contains(body, `id="chat"`) || strings.Contains(body, "chat.js") {
+		t.Fatal("chat panel on a not-ready page")
+	}
+}
+
+func TestChatJS_NoInnerHTML(t *testing.T) {
+	src, err := staticFS.ReadFile("static/chat.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "eval(", "document.write"} {
+		if strings.Contains(string(src), bad) {
+			t.Fatalf("chat.js contains %q", bad)
+		}
 	}
 }

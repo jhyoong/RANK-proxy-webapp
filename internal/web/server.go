@@ -1,5 +1,6 @@
-// Package web serves the portal UI: login form, per-site diagnostics page
-// and logout. Plain HTML forms, no JavaScript.
+// Package web serves the portal UI: login form, cluster list, per-cluster
+// kagent check with a chat panel, diagnostics and logout. The only script is
+// /static/chat.js, which streams one kagent reply at a time.
 package web
 
 import (
@@ -12,8 +13,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/jhyoong/RANK-proxy-webapp/internal/a2a"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/config"
@@ -23,7 +26,7 @@ import (
 const (
 	cookieName  = "portal_session"
 	maxFormSize = 4 << 10
-	csp         = "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+	csp         = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 )
 
 //go:embed templates/*.html
@@ -48,21 +51,26 @@ type server struct {
 	cfg     *config.Config
 	authn   Authn
 	cl      Clusters
+	ch      Chat
 	now     func() time.Time
 	store   *session.Store
 	version string
 	log     *slog.Logger
 	pages   map[string]*template.Template
+
+	mu     sync.Mutex
+	active map[string]bool // session IDs with a running chat reply
 }
 
 // New returns the portal's HTTP handler.
-func New(cfg *config.Config, a Authn, c Clusters, store *session.Store, version string, log *slog.Logger) (http.Handler, error) {
-	_, h, err := build(cfg, a, c, store, version, log)
+func New(cfg *config.Config, a Authn, c Clusters, ch Chat, store *session.Store, version string, log *slog.Logger) (http.Handler, error) {
+	_, h, err := build(cfg, a, c, ch, store, version, log)
 	return h, err
 }
 
-func build(cfg *config.Config, a Authn, c Clusters, store *session.Store, version string, log *slog.Logger) (*server, http.Handler, error) {
-	s := &server{cfg: cfg, authn: a, cl: c, now: time.Now, store: store, version: version, log: log, pages: map[string]*template.Template{}}
+func build(cfg *config.Config, a Authn, c Clusters, ch Chat, store *session.Store, version string, log *slog.Logger) (*server, http.Handler, error) {
+	s := &server{cfg: cfg, authn: a, cl: c, ch: ch, now: time.Now, store: store, version: version, log: log,
+		pages: map[string]*template.Template{}, active: map[string]bool{}}
 	funcs := template.FuncMap{"principal": principalOf, "esc": url.PathEscape, "deref": func(b *bool) bool { return *b }}
 	for _, p := range []string{"login", "home", "diagnostics", "cluster", "loggedout"} {
 		t, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/"+p+".html")
@@ -83,6 +91,7 @@ func build(cfg *config.Config, a Authn, c Clusters, store *session.Store, versio
 	mux.HandleFunc("GET /diagnostics", s.diagnostics)
 	mux.HandleFunc("POST /clusters/refresh", s.refresh)
 	mux.HandleFunc("GET /clusters/{site}/{id}", s.cluster)
+	mux.HandleFunc("POST /clusters/{site}/{id}/chat", s.chat)
 	mux.HandleFunc("POST /logout", s.logout)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
@@ -121,6 +130,10 @@ type pageData struct {
 	Query    string
 	Row      clusters.Row
 	Check    clusters.CheckResult
+	// ContextID is a fresh A2A context for the chat panel; MaxMessage caps
+	// its textarea.
+	ContextID  string
+	MaxMessage int
 }
 
 func (s *server) render(w http.ResponseWriter, code int, page string, d pageData) {
@@ -266,7 +279,8 @@ func (s *server) cluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := s.cl.Check(r.Context(), sess.Sites, row, sess.Principal)
-	s.render(w, http.StatusOK, "cluster", pageData{Session: sess, Row: row, Check: res})
+	s.render(w, http.StatusOK, "cluster", pageData{Session: sess, Row: row, Check: res,
+		ContextID: a2a.NewUUID(), MaxMessage: s.cfg.Chat.MaxMessageBytes})
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
