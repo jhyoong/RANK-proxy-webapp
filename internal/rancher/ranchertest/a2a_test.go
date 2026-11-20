@@ -121,11 +121,21 @@ func TestFakeChat_DefaultStreams(t *testing.T) {
 	if evs := readEvents(t, resp2); !strings.Contains(evs[6], "turn 2") {
 		t.Fatalf("second turn: %s", evs[6])
 	}
+	if !strings.Contains(evs[0], `say \"hi\"`) || !strings.Contains(evs[0], `"role":"user"`) {
+		t.Fatalf("echo: %s", evs[0])
+	}
+	if !strings.Contains(evs[4], "(turn 1)") {
+		t.Fatalf("partial: %s", evs[4])
+	}
 	if e.f.ChatCalls() != 2 {
 		t.Fatalf("ChatCalls = %d", e.f.ChatCalls())
 	}
 	if e.f.LastChatBody()["method"] != "message/stream" {
 		t.Fatalf("LastChatBody = %v", e.f.LastChatBody())
+	}
+	u := e.f.LastChatURL()
+	if u == nil || u.Query().Has("user_id") || !strings.HasSuffix(u.Path, "/") {
+		t.Fatalf("LastChatURL = %v", u)
 	}
 	h := e.f.LastChatHeaders()
 	if h.Get("Authorization") == "" || h.Get("X-User-Id") != "" {

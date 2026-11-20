@@ -3,6 +3,7 @@ package ranchertest
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -63,6 +64,17 @@ func (f *Fake) LastChatHeaders() http.Header {
 	return f.chatHeaders.Clone()
 }
 
+// LastChatURL returns a copy of the URL of the most recent A2A POST.
+func (f *Fake) LastChatURL() *url.URL {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.chatURL == nil {
+		return nil
+	}
+	u := *f.chatURL
+	return &u
+}
+
 // ChatCancelled counts chat requests whose context ended before all steps were sent.
 func (f *Fake) ChatCancelled() int {
 	f.mu.Lock()
@@ -77,6 +89,8 @@ func (f *Fake) chat(w http.ResponseWriter, r *http.Request, cl *FakeCluster, use
 	f.chatCalls++
 	f.chatBody = body
 	f.chatHeaders = r.Header.Clone()
+	u := *r.URL
+	f.chatURL = &u
 	f.mu.Unlock()
 	if cl.Deny[user] {
 		http.Error(w, "forbidden", http.StatusForbidden)

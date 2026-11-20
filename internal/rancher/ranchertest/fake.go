@@ -72,6 +72,7 @@ type Fake struct {
 	chatCalls     int
 	chatBody      map[string]any
 	chatHeaders   http.Header
+	chatURL       *url.URL
 	chatCancelled int
 	chatTurns     map[string]int // contextId -> messages seen
 }
