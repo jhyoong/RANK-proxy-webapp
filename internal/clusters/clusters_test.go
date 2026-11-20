@@ -48,6 +48,11 @@ type env struct {
 
 func setup(t *testing.T, fs []*ranchertest.Fake) env {
 	t.Helper()
+	return setupWith(t, fs, false)
+}
+
+func setupWith(t *testing.T, fs []*ranchertest.Fake, includeLocal bool) env {
+	t.Helper()
 	var clients []*rancher.Client
 	for i, f := range fs {
 		site := config.Site{Name: []string{"site-1", "site-2", "site-3"}[i]}
@@ -61,7 +66,7 @@ func setup(t *testing.T, fs []*ranchertest.Fake) env {
 	logs := &syncBuf{}
 	log := slog.New(slog.NewJSONHandler(logs, nil))
 	res := auth.New(clients, time.Hour, log).Login(context.Background(), "jdoe", "pw")
-	return env{clusters.New(clients, config.KagentConfig{}, log), res.Sites, logs}
+	return env{clusters.New(clients, config.KagentConfig{}, includeLocal, log), res.Sites, logs}
 }
 
 func ids(l *clusters.Listing) []string {
@@ -116,6 +121,20 @@ func TestList_DropsLocal(t *testing.T) {
 		if s.Count != 1 {
 			t.Fatalf("count = %d", s.Count)
 		}
+	}
+}
+
+func TestList_IncludeLocal(t *testing.T) {
+	e := setupWith(t, newFakes([]ranchertest.FakeCluster{cl("local", "local"), cl("c-1", "one")}), true)
+	l := e.svc.List(context.Background(), e.sites)
+	if got, want := ids(l), []string{"site-1/local", "site-1/c-1"}; !eq(got, want) {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+	if l.Sites[0].Count != 2 {
+		t.Fatalf("count = %d", l.Sites[0].Count)
+	}
+	if _, ok := l.Find("site-1", "local"); !ok {
+		t.Fatal("Find(local) not found")
 	}
 }
 

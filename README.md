@@ -28,7 +28,7 @@ Test users: `admin1`/`pass1` (all sites ok), `drift`/`pass1` (site-2 rejects: dr
 
 Pages:
 
-- `/home`: the cluster list across sites (about 120 rows; each site's `local` cluster is hidden). Filter with `?q=prod`; the Refresh button reloads the list from Rancher (the list is otherwise cached for `clusters.cache_ttl`). Disconnected clusters are greyed out.
+- `/home`: the cluster list across sites (about 120 rows; each site's `local` cluster is hidden unless `clusters.include_local: true`). Filter with `?q=prod`; the Refresh button reloads the list from Rancher (the list is otherwise cached for `clusters.cache_ttl`). Disconnected clusters are greyed out.
 - `/clusters/{site}/{id}`: runs the kagent check for one cluster and shows the result (`ready`, `no-access`, `not-installed`, `not-running`, `unreachable`, ...). In the fake, each site has one cluster whose agent card returns 404 (`not-installed`), one 503 (`not-running`) and one that hangs (`unreachable` after the 5s API timeout).
 - `/diagnostics`: the per-site login table plus the raw cluster list with states and conditions.
 

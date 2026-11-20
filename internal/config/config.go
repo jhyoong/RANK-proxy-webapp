@@ -60,6 +60,9 @@ type KagentConfig struct {
 type ClustersConfig struct {
 	// CacheTTL is how long a session's cluster list is cached.
 	CacheTTL time.Duration `yaml:"cache_ttl"`
+	// IncludeLocal lists each site's "local" management cluster. Off by
+	// default; turn on only where kagent is deployed in the local cluster.
+	IncludeLocal bool `yaml:"include_local"`
 }
 
 // APIConfig holds settings for Rancher/cluster API calls after login.

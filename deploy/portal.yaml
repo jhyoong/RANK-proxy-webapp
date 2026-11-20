@@ -36,6 +36,8 @@ data:
       agent_name: <agent-name>
     clusters:
       cache_ttl: 2m
+      # true only if kagent runs in a site's "local" cluster (hidden otherwise).
+      include_local: false
     api:
       timeout: 15s
     # Chat with the kagent agent. log_events logs the shape (never the

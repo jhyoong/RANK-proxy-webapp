@@ -52,6 +52,9 @@ kagent:
 clusters:
   # How long a session's cluster list is cached.
   cache_ttl: 2m
+  # List each site's "local" management cluster (hidden by default). Turn on
+  # only where kagent is deployed in the local cluster.
+  include_local: false
 
 api:
   # Timeout for each cluster list / check request to Rancher.

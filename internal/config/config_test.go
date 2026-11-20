@@ -90,8 +90,18 @@ func TestLoad_KagentDefaults(t *testing.T) {
 	}
 	if c.Kagent.Namespace != "kagent" || c.Kagent.Service != "http:kagent-controller:8083" ||
 		c.Kagent.AgentNamespace != "kagent" || c.Kagent.AgentName != "test-agent" ||
-		c.Clusters.CacheTTL != 2*time.Minute || c.API.Timeout != 15*time.Second {
+		c.Clusters.CacheTTL != 2*time.Minute || c.Clusters.IncludeLocal || c.API.Timeout != 15*time.Second {
 		t.Fatalf("bad defaults: %+v %+v %+v", c.Kagent, c.Clusters, c.API)
+	}
+}
+
+func TestLoad_IncludeLocal(t *testing.T) {
+	c, err := Load(writeConfig(t, "clusters:\n  include_local: true\n"+minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Clusters.IncludeLocal {
+		t.Fatal("include_local not parsed")
 	}
 }
 
@@ -161,7 +171,7 @@ func TestLoad_Rejects(t *testing.T) {
 		{"chat message negative", "chat:\n  max_message_bytes: -1\n" + minimal, "max_message_bytes"},
 		{"chat idle > max", "chat:\n  idle_timeout: 40m\n  max_duration: 30m\n" + minimal, "idle_timeout"},
 		{"unknown chat key", "chat:\n  mode: send\n" + minimal, "mode"},
-		{"unknown clusters key", "clusters:\n  include_local: true\n" + minimal, "include_local"},
+		{"unknown clusters key", "clusters:\n  include_remote: true\n" + minimal, "include_remote"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
