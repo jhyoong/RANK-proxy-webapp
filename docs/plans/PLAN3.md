@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.27.4 standard library, `go.yaml.in/yaml/v3`, and plain browser JavaScript (no libraries). The distroless image and CI are the same as Plans 1 and 2.
 
-**Spec:** [PLAN3-design.md](PLAN3-design.md). Read [PLAN2.md](PLAN2.md) for the code it builds on.
+**Spec:** [PLAN3-design.md](PLAN3-design.md). Read [PLAN2.md](PLAN2.md) for the code it builds on, and [kagent-chat-via-rancher.md](../kagent-chat-via-rancher.md) for the kagent event shapes and the timeouts along the path.
 
 ## Global Constraints
 
@@ -37,6 +37,8 @@
 | other HTTP code | `Unexpected response (HTTP <n>)` |
 | JSON-RPC error | `Agent error: <message, max 300 chars>` |
 | state `failed` or `rejected` | `The agent reported the task failed` |
+| final state `input-required` | `The agent is asking for approval, which the portal doesn't support yet` |
+| stream ended (EOF) before any `final: true` event | `The connection to the agent was cut before the reply finished` |
 | unparseable or oversized event | `Unexpected event from the agent` |
 | total cap | `Reply took longer than <max_duration> and was stopped` |
 | silence cap | `No response from the agent for <idle_timeout>; stopped` |
@@ -52,6 +54,8 @@ Durations are formatted with `time.Duration.String()` (e.g. `30m0s`).
 3. **Agent text that contains newlines, `\n\nevent: done`, or HTML.** It must not break SSE framing or reach the DOM as markup. Tests: `TestWriteEvent_FramingSafe` (Task 6). Code review of `chat.js`: only `textContent`.
 4. **One site's token expires mid-session.** The chat shows the expired message for that site, and the portal session and other sites keep working. Test: `TestSend_PreStreamCodes` 401 row (Task 5), `TestChat_401KeepsSession` (Task 6).
 5. **kagent sends something unexpected:** a malformed JSON event, an event over 1 MiB, or an unknown kind. The reply ends with `Unexpected event from the agent` for the first two, ignores the third, and always ends with `done`. Tests: `TestReader_Oversized`, `TestParse_UnknownKindIgnored` (Task 3), `TestSend_MalformedEvent` (Task 5).
+6. **Text appears exactly once.** The `submitted` echo of the user's message is not shown as agent output. A complete step replaces its partial chunks rather than adding to them, and an answer that repeats the last step replaces that line. Tests: `TestParse_UserEcho` (Task 3), `TestSend_DefaultScript` (Task 5). Code review of `chat.js`.
+7. **A stream cut by a timeout in the chain** (EOF with no final event) is reported as `cut-off`, never as `completed`. Test: `TestSend_EOFWithoutFinal` (Task 5).
 
 ---
 
@@ -156,17 +160,18 @@ Run every test with `go test -race ./...`.
 **Interfaces:**
 - Produces:
   ```go
-  type Text struct{ Text string; Partial bool } // Partial: part or message metadata adk_partial == true
+  type Text struct{ Text string; Partial bool } // Partial: part or message metadata kagent_adk_partial or adk_partial == true
   type Event struct {
       Kind               string // "status-update","artifact-update","task","message","error"; "" if unknown
       TaskID, ContextID  string
+      Role               string // role of status.message (or of the message), "" if none
       State              string // status.state, if any
       Final              bool
       Texts              []Text
       Tools              []string // function-call data part names
       ErrCode            int
       ErrMessage         string
-      Shape              string // e.g. "status-update state=working final=false parts=text,data meta=adk_partial,kagent_type"
+      Shape              string // e.g. "status-update state=working final=false parts=text,data meta=kagent_adk_partial,kagent_type"
   }
   var ErrEventTooLarge = errors.New("a2a: event exceeds 1 MiB")
   var ErrBadEvent = errors.New("a2a: event is not valid JSON-RPC")
@@ -179,7 +184,12 @@ Run every test with `go test -race ./...`.
   - `artifact-update`: `taskId`, `contextId`, `artifact.parts`.
   - `task`: `id`, `contextId`, `status.state`, `status.message.parts`.
   - `message`: `contextId`, `parts`. Treat as final.
-- Parts: `kind:"text"` → `Texts`. `kind:"data"` → a tool name when any metadata key ending in `_type` has the value `function_call`, taking the name from `data.name`. Other data parts are ignored. The partial flag is read from `metadata.adk_partial` on the part or on the enclosing message.
+- Parts:
+  - `kind:"text"` → `Texts`.
+  - `kind:"data"` → a tool name when any metadata key ending in `_type` has the value `function_call`, taking the name from `data.name`.
+  - Other data parts, including `function_response`, are ignored.
+- The partial flag is read from `kagent_adk_partial` (Python runtime) or `adk_partial` (Go runtime), in the metadata of the part or of the enclosing message.
+- `Role` comes from `status.message.role`, or from `role` for a `message`.
 - `Shape` lists metadata **keys only**, sorted and de-duplicated, never values.
 
 - [ ] **Step 1: Write failing tests** (inline SSE fixtures):
@@ -188,7 +198,11 @@ Run every test with `go test -race ./...`.
   - `TestReader_Oversized`: one `data:` line of 1 MiB + 1 gives `ErrEventTooLarge`.
   - `TestReader_EOF`: an empty stream gives `io.EOF`. A final event with no trailing blank line is still returned, then `io.EOF`.
   - `TestParse_StatusUpdateWithTextAndTool`: `Kind`, `TaskID`, `State=="working"`, `Texts[0].Text`, `Tools==["k8s_get_resources"]` (metadata `{"kagent_type":"function_call"}`), and `Shape` contains `meta=kagent_type` and no values.
-  - `TestParse_PartialText`: `adk_partial:true` gives `Partial==true`.
+  - `TestParse_PartialText` (table):
+    - `kagent_adk_partial:true` and `adk_partial:true` on the message metadata both give `Partial==true`;
+    - the same keys on the part do too;
+    - `false` or missing gives `false`.
+  - `TestParse_UserEcho`: a `submitted` status-update whose `status.message` has `role:"user"` gives `Role=="user"` and its text.
   - `TestParse_ArtifactUpdate`, `TestParse_FinalCompleted` (`Final==true`, `State=="completed"`), `TestParse_Message` (`Final==true`).
   - `TestParse_JSONRPCError`: gives `Kind=="error"`, `ErrCode`, `ErrMessage`.
   - `TestParse_UnknownKindIgnored`: `{"result":{"kind":"something"}}` gives `Kind==""` and no error.
@@ -219,7 +233,7 @@ Run every test with `go test -race ./...`.
   ChatSteps  []Step // nil -> DefaultChat()
   ChatHang   bool   // send headers, then block until the request ends
 
-  func DefaultChat() []Step // working status -> tool call -> 2 partial texts -> artifact answer -> final completed
+  func DefaultChat() []Step // submitted echo -> working -> tool call -> 2 partial texts -> complete step -> artifact -> final completed
   // added to Fake:
   func (f *Fake) ChatCalls() int
   func (f *Fake) LastChatBody() map[string]any
@@ -227,10 +241,18 @@ Run every test with `go test -race ./...`.
   func (f *Fake) ChatCancelled() int // count of chat requests whose context ended before all steps were sent
   ```
 - Routing: `POST` on the A2A path (the card path's segments minus `.well-known/agent-card.json`, ending in `/`). It returns 403 if the user is in the cluster's `Deny`, else `ChatStatus` if set. Otherwise it checks that `method=="message/stream"`, the `contextId` is non-empty and there is exactly one text part (else 400). It then writes `Content-Type: text/event-stream` and each step after its `Delay`, flushing after each, and stops early when `r.Context()` is done. `{{text}}` is the user's text (JSON-escaped). `{{turn}}` counts messages per `contextId` (1, 2, ...).
-- `DefaultChat()` uses realistic kagent shapes: a `status-update` with `state: working`; a data part `{kind:data, data:{name:"k8s_get_resources",args:{}}, metadata:{kagent_type:"function_call"}}`; two text parts with `metadata:{adk_partial:true}`; an `artifact-update` with the text `Answer to "{{text}}" (turn {{turn}})`; and a final `status-update` with `state: completed`, `final: true`. Each step has a 20ms delay.
+- `DefaultChat()` uses the kagent shapes seen in the test lab (see `kagent-chat-via-rancher.md` §3). It has 8 events, each with a 20ms delay:
+  1. A `status-update` with `state: submitted` whose `status.message` has `role: "user"` and the text `{{text}}`.
+  2. A `status-update` with `state: working`, no message, and `metadata: {kagent_session_id, kagent_user_id}`.
+  3. A `working` status-update whose message (`role: "agent"`, `metadata: {kagent_adk_partial: false}`) has the data part `{kind:data, data:{id:"call_1", name:"k8s_get_resources", args:{}}, metadata:{kagent_type:"function_call"}}`.
+  4. The partial chunk `Answer to "{{text}}"`, in a `working` status-update whose message metadata has `kagent_adk_partial: true`.
+  5. The partial chunk ` (turn {{turn}})`, sent the same way.
+  6. The complete step: a `working` status-update with `kagent_adk_partial: false` and the full text `Answer to "{{text}}" (turn {{turn}})`.
+  7. An `artifact-update` with the same full text.
+  8. A final `status-update` with `state: completed` and `final: true`.
 
 - [ ] **Step 1: Write failing tests:**
-  - `TestFakeChat_DefaultStreams`: a raw HTTP POST through `NewTLS` reads 5 SSE events, the artifact contains the text and `turn 1`, and a second POST with the same `contextId` says `turn 2`.
+  - `TestFakeChat_DefaultStreams`: a raw HTTP POST through `NewTLS` reads 8 SSE events, the artifact contains the text and `turn 1`, and a second POST with the same `contextId` says `turn 2`.
   - `TestFakeChat_Deny403`, `TestFakeChat_Status` (`ChatStatus: 503`), `TestFakeChat_BadMethod400`.
   - `TestFakeChat_HangCancelled`: with `ChatHang`, cancelling the client ctx makes `ChatCancelled()==1` within 1s.
 - [ ] **Step 2:** Run `go test ./internal/rancher/...` and expect FAIL.
@@ -265,28 +287,42 @@ Run every test with `go test -race ./...`.
   - A goroutine calls `Next()` and sends results on a channel.
   - The main loop selects on: the event channel; a `Heartbeat` ticker (emit `ping` only if no event arrived since the last tick); an idle timer reset on every event (`IdleTimeout`); and `ctx.Done()`.
 - Event mapping:
-  - non-final `status-update`: each text → `progress`; each tool → `tool`.
+  - texts of an event with `Role=="user"` (the `submitted` echo) are skipped. Its state still counts.
+  - non-final `status-update`: each text → `progress` (with its `Partial` flag); each tool → `tool`.
   - final `status-update`, `message` or `artifact-update`: each text → `answer`. Tools in any event → `tool`.
   - Emit `state` when `State` is non-empty and differs from the last one.
   - `failed`/`rejected` → error `The agent reported the task failed`.
+  - final `input-required` → error `The agent is asking for approval, which the portal doesn't support yet`.
   - `Kind=="error"` → `Agent error: ...`, then stop.
   - `ErrBadEvent`/`ErrEventTooLarge` → `Unexpected event from the agent`, then stop.
-  - Stop on `Final` or `io.EOF`.
-- `result` values for the audit line: `completed`, `failed`, `error`, `timeout`, `idle-timeout`, `cancelled` (the parent ctx was cancelled, i.e. browser gone or Stop), `expired`, `no-access`, `not-installed`, `not-running`, `unreachable`, `unexpected`. If the stream ended on EOF without a final state, the result is the last state, or `completed` if there was none.
+  - Stop on `Final` or `io.EOF`. `io.EOF` before any `Final` event → error `The connection to the agent was cut before the reply finished`.
+- `result` values for the audit line: `completed`, `failed`, `input-required`, `error`, `cut-off` (EOF before a final event), `timeout`, `idle-timeout`, `cancelled` (the parent ctx was cancelled, i.e. browser gone or Stop), `expired`, `no-access`, `not-installed`, `not-running`, `unreachable`, `unexpected`. `done.state` is the last state seen, whatever the result.
 - Log `event=chat` once per call (Info), with `site`, `cluster`, `principal`, `context_id`, `task_id`, `http_code`, `first_event_ms`, `total_ms`, `events`, `result`, and `rancher_body` for codes other than 401/403/404. When `LogEvents`, log `event=chat_event` per upstream event with `context_id`, `n`, `ms` and `shape`.
 
 - [ ] **Step 1: Write failing tests** (fake through `ranchertest.NewTLS`; collect `Out`s in a slice; a `syncBuf` logger as in `clusters_test.go`):
-  - `TestSend_DefaultScript`: the types in order are `state(working)`, `tool`, `progress`, `progress`, `answer`, `state(completed)`, `done`. The answer contains the text. `done.state=="completed"`. The fake's last request has **no** `X-User-Id` header and no `user_id` query parameter.
+  - `TestSend_DefaultScript`: the types in order are:
+    1. `state(submitted)`
+    2. `state(working)`
+    3. `tool`
+    4. `progress(partial)`
+    5. `progress(partial)`
+    6. `progress(complete, full text)`
+    7. `answer`
+    8. `state(completed)`
+    9. `done`
+
+    No `progress` or `answer` equals the bare user text, so the echo is skipped. The answer contains the text, and `done.state=="completed"`. The fake's last request has **no** `X-User-Id` header and no `user_id` query parameter.
   - `TestSend_MultiTurnSameContext`: two `Send`s with one `contextID` give answers with `turn 1` then `turn 2`.
   - `TestSend_PreStreamCodes` (table): 401/403/404/503/502/418 give the exact copy, then `done`. The 401 row's message names the site.
   - `TestSend_SiteNotLoggedIn`: an `expired` error, `ChatCalls()==0`.
-  - `TestSend_JSONRPCError`, `TestSend_FailedState`: exact copy, then done.
+  - `TestSend_JSONRPCError`, `TestSend_FailedState`, `TestSend_InputRequired`: exact copy, then done. The log has `result=error`, `failed` and `input-required` respectively.
+  - `TestSend_EOFWithoutFinal`: a script with only the `submitted` and `working` steps (no final) gives `The connection to the agent was cut before the reply finished`, then `done` with `state=="working"`. The log has `result=cut-off`.
   - `TestSend_MalformedEvent`: a step with `Raw: "data: {not json\n\n"` gives `Unexpected event from the agent`, then done.
   - `TestSend_IdleTimeout`: `IdleTimeout 200ms`, `ChatHang`: `No response from the agent for 200ms; stopped`, done within 1s, and the fake sees the cancellation.
   - `TestSend_TotalTimeout`: `MaxDuration 300ms`, steps every 100ms for 2s: `Reply took longer than 300ms and was stopped`.
   - `TestSend_HeartbeatDuringSilence`: `Heartbeat 50ms`, one step with a 300ms delay: at least 3 `ping`s before the answer, no error.
   - `TestSend_CancelStopsUpstream`: cancel the parent ctx after the first event. `Send` returns within 1s, the last `Out` is `done`, `result=cancelled` is in the log, and `ChatCancelled()==1`.
-  - `TestSend_LogFields`: the `event=chat` line has every listed key and contains neither the bearer, the user's text nor the answer text. With `LogEvents`, there are 5 `event=chat_event` lines and none contains the answer text.
+  - `TestSend_LogFields`: the `event=chat` line has every listed key and contains neither the bearer, the user's text nor the answer text. With `LogEvents`, there are 8 `event=chat_event` lines and none contains the answer text.
 - [ ] **Step 2:** Run `go test ./internal/chat/` and expect FAIL.
 - [ ] **Step 3:** Implement.
 - [ ] **Step 4:** Run `go test -race ./...` and expect PASS. Run the chat tests with `-count=20` to shake out timing flakes.
@@ -323,7 +359,9 @@ Run every test with `go test -race ./...`.
 - `writeEvent` writes JSON with `json.Marshal` (which escapes `\n`, `<` and `>`), so the data is always one line.
 - The cluster page, when `Check.Outcome=="ready"`, renders `<section id="chat" data-chat-url="/clusters/{site}/{id}/chat" data-csrf="..." data-context-id="<a2a.NewUUID()>">`. Inside it: a `#log` div, a `<textarea id="msg" maxlength="<MaxMessageBytes>">`, and the buttons `#send`, `#stop` (disabled) and `#new` (a link to the same page). After the panel, `<script src="/static/chat.js" defer></script>`. Other outcomes render `<button disabled>Chat unavailable: {{.Check.Message}}</button>`.
 - `layout.html`: the tag text becomes `chat test`. The `csp` const becomes the Global Constraints value.
-- `chat.js` behaviour is as in the design's "/static/chat.js" section and the Global Constraints browser copy. CSS classes: `.you`, `.agent`, `.progress`, `.tool`, `.err`, `.diag`.
+- `chat.js` behaviour is as in the design's "/static/chat.js" section and the Global Constraints browser copy. In particular:
+  - a complete (non-partial) `progress` replaces the open partial line instead of starting a new one;
+  - an `answer` whose text equals the most recent progress line removes that line. CSS classes: `.you`, `.agent`, `.progress`, `.tool`, `.err`, `.diag`.
 - `main.go`: `chat.New(apiClients, cfg.Kagent, cfg.Chat, log)`, passed to `web.New`. Update the package comment.
 
 - [ ] **Step 1: Write failing tests** (a `stubChat` that records calls and emits scripted `Out`s; it can block on `ctx.Done()`; use `httptest.NewServer` where real streaming is needed):
@@ -355,16 +393,18 @@ Run every test with `go test -race ./...`.
   - one whose script sends a JSON-RPC error
   - one whose script ends with `state: failed`
   - one with `ChatHang`
+  - one whose script ends after the `working` step with no final event (cut-off)
 
   Add `chat: {idle_timeout: 30s, heartbeat: 5s, log_events: true}` to the generated config. Update the doc comment and the startup log.
 - [ ] **Step 2: Manual check in a browser:** run `go run ./cmd/fakerancher` and `go run ./cmd/portal -config dev/config.yaml`. As `admin1` on a ready cluster:
   - Progress, tool and answer lines appear one by one.
+  - No text appears twice. Your own message isn't repeated as agent output. The partial chunks merge into one line, and the answer doesn't repeat the last progress line.
   - A follow-up says `turn 2`. New conversation resets to `turn 1`.
   - Stop shows `Stopped`, and the next send works.
   - A second tab sending at the same time gets the 429 message.
   - The silent-gap cluster completes, with pings in the browser's network view.
   - The hang cluster ends with the silence-cap message after about 30s.
-  - The error and failed clusters show their copy.
+  - The error, failed and cut-off clusters show their copy.
   - As `limited` on a prod cluster, there is no chat panel.
   - The browser console shows no CSP violations.
 - [ ] **Step 3:** Add the `chat:` block to the ConfigMap in `deploy/portal.yaml`, with `log_events: true` for the live test. Update the README: the chat section, the new fake clusters, and a note that any ingress in front of the portal must disable response buffering and allow reads of at least `chat.max_duration`.
@@ -379,7 +419,16 @@ Run every test with `go test -race ./...`.
 - Create: `docs/plans/PLAN3-live-test.md`
 
 - [ ] **Step 1:** Write it in the same structure and tone as `PLAN2-live-test.md`:
-  - "Before you start": image `v0.3.0` by digest; `chat.log_events: true`; note one ready test cluster per site; agent pod log access for C2; watch for `event=chat` and `event=chat_event`; one long test at a time per site.
+  - "Before you start":
+    - image `v0.3.0` by digest;
+    - `chat.log_events: true`;
+    - note one ready test cluster per site;
+    - agent pod log access for C2;
+    - watch for `event=chat` and `event=chat_event`;
+    - one long test at a time per site.
+    - **Per site, record the Rancher version** (`https://<site>/rancherversion`). Below v2.13.9 is worth flagging to the site owners.
+    - **If anyone can read the Rancher local cluster,** record whether `kubectl -n cattle-system get ingress rancher -o yaml` has the `nginx.ingress.kubernetes.io/proxy-read-timeout` and `proxy-send-timeout` annotations, and their values.
+    - Kubeconfigs for the test clusters, downloaded from the Rancher UI (for C10).
   - The test table below.
   - A short report format, "What each field means", "If a test fails", and "Never type". Message text and agent answers are never typed into the report either. Only codes, timings and shapes go in.
 
@@ -387,13 +436,14 @@ Run every test with `go test -race ./...`.
   | --- | --- | --- | --- |
   | C1 | On one ready cluster per site, ask a short question (e.g. "list namespaces") | Lines appear one by one while the agent works, then an answer and the diagnostics line | Per site: live `y`/`n`, first-event ms, events, total ms |
   | C2 | Ask a follow-up that needs the previous answer | The agent uses the earlier answer. No `SessionNotFoundError` in the agent pod log | Pass/fail |
-  | C3 | Ask something that makes the agent run tools for over 2 minutes, ideally one tool call over 60s | Completes | Pass/fail; if cut off, after how long and the error text |
-  | C4 | Press Stop during a reply, then send again | `Stopped`; the next reply works | Pass/fail |
+  | C3 | Ask something that makes the agent run tools for over 2 minutes, ideally one tool call over 60s | Completes | Pass/fail; if cut off, after how long, the error text, and the `result` in `event=chat` (`cut-off` or `idle-timeout`) |
+  | C4 | Press Stop during a reply, then send again. Optionally, a minute later, run `kubectl get --raw "/api/v1/namespaces/kagent/services/http:kagent-controller:8083/proxy/api/sessions/<context_id>/tasks?user_id=admin@kagent.dev"` with that cluster's kubeconfig. Take `<context_id>` from the `event=chat` line. | `Stopped`; the next reply works | Pass/fail; optionally the stopped turn's `status.state` (only the state, not the content) |
   | C5 | Send in two tabs at once | The second shows `A reply is already running in another tab` | Pass/fail |
   | C6 | New conversation, then ask about the previous answer | The agent doesn't know it | Pass/fail |
   | C7 | Open a cluster whose check isn't `ready` (if any) | `Chat unavailable: ...`, no chat box | Pass/skip |
   | C8 | Optional: log out of one site in the Rancher UI, then send on a cluster of that site | `Your session on <site> has expired: log in again`; other sites still chat | Pass/skip |
   | C9 | From the `event=chat_event` lines of one C1 reply, list the distinct `shape` values | — | The shapes, one per line |
+  | C10 | Per site, with a test cluster's kubeconfig: `time kubectl get --raw "/api/v1/namespaces/default/configmaps?watch=1&fieldSelector=metadata.name=nonexistent&timeoutSeconds=150"` | Closes after about 150s | Per site: seconds until it closed |
 
   Report example:
   ```
@@ -401,20 +451,23 @@ Run every test with `go test -race ./...`.
   C1 pass  live s1=y s2=y s3=y  first s1=900 s2=850 s3=1200  events s1=31 s2=28 s3=40  total s1=41s s2=38s s3=55s
   C2 pass
   C3 pass  total=3m10s
-  C4 pass
+  C4 pass  kagent state after stop=completed
   C5 pass
   C6 pass
   C7 skip
   C8 skip
   C9 shapes:
-    task state=submitted parts= meta=
-    status-update state=working final=false parts=data meta=kagent_type
-    status-update state=working final=false parts=text meta=adk_partial
+    status-update state=submitted final=false parts=text meta=
+    status-update state=working final=false parts= meta=kagent_session_id,kagent_user_id
+    status-update state=working final=false parts=text,data meta=kagent_adk_partial,kagent_type
+    status-update state=working final=false parts=text meta=kagent_adk_partial
     artifact-update parts=text meta=
     status-update state=completed final=true parts= meta=
+  C10 s1=150 s2=150 s3=60
+  rancher s1=v2.13.3 s2=v2.13.3 s3=v2.13.3  ingress timeouts s1=1800 s2=? s3=none
   warn/error: none
   other: none
   ```
-  Include the "If streaming fails on site" table from the design, so the tester knows which C1/C3 observations matter.
+  Include the "If streaming fails on site" table from the design, so the tester knows which C1/C3/C10 observations matter.
 - [ ] **Step 2:** Stage the file and ask the user to commit: `docs: live-test kit for plan 3`.
-- [ ] **Step 3: Handoff:** the user pushes, CI builds the image, the user tags `v0.3.0`, moves the image in, runs `PLAN3-live-test.md` and brings back the report. C1/C3 decide whether a fallback plan is needed. C9 confirms or corrects the event parsing. Then Plan 4 (hardening).
+- [ ] **Step 3: Handoff:** the user pushes, CI builds the image, the user tags `v0.3.0`, moves the image in, runs `PLAN3-live-test.md` and brings back the report. C1/C3/C10 decide whether a fallback plan is needed. C4's kagent state shows whether polling the session's tasks can recover a cut stream. C9 confirms or corrects the event parsing. Then Plan 4 (hardening).

@@ -12,13 +12,20 @@ As before, the build ends with a short live-test runbook and a report that is ty
 
 ## Facts this design rests on
 
-- All three Rancher sites run v2.13.3. Tokens last 8h.
+- All three Rancher sites run v2.13.3. Tokens last 8h. [kagent-chat-via-rancher.md](../kagent-chat-via-rancher.md) recommends at least v2.13.9 for its security fixes, and v2.13.5 is the first release that returns an error at once when the downstream impersonation token is missing. Upgrading is the site owners' decision. The live test records each site's version.
 - Fetching the agent card through Rancher works (checked by hand on site; Plan 2 L3 *(depends on Plan 2)*).
 - kagent is v0.9.6, A2A 0.3. The A2A endpoint is `.../proxy/api/a2a/<agent_ns>/<agent_name>/`, with the trailing `/`.
-- kagent's streaming timeout on site is **30m** (quick findings).
-- The multi-turn bug (#1882) was fixed before v0.9.5, so reusing one `contextId` across messages should work on v0.9.6 (R2, unverified on site).
-- **Not yet known (R1):** whether events stream through each site's load balancer and ingress one by one or arrive all at the end, and which timeout cuts off a long or silent investigation. The ingress-nginx default is 60s, and the v2.13 Rancher chart sets 1800s (E3, not checked on site). Plan 3's live test measures this.
-- kagent sends no heartbeats while a tool runs. Silences of minutes are normal.
+- kagent's streaming timeout on site is **30m** (quick findings). The Helm default for `controller.streaming.timeout` is 600s, and it caps the **whole turn** even while data is flowing. A turn cut at about 10m means a site still runs the default.
+- The multi-turn bug (#1882) is fixed in v0.9.6. A second turn on the same `contextId` worked in the test lab on Rancher v2.14.0 (R2, not yet checked on site).
+- **Not yet known (R1):** whether events stream through each site's load balancer and ingress one by one or arrive all at the end, and which timeout cuts off a long or silent investigation. The v2.13 Rancher chart sets read and send timeouts of 1800s on its ingress by default. Without those annotations, ingress-nginx's 60s default applies, and in the v2.14.0 test lab streams were cut at exactly 60.0s of silence (E3, not checked on site). Plan 3's live test measures this.
+- kagent sends no heartbeats while a tool runs. Silences of minutes are normal (79s seen in the test lab). The portal's heartbeat only keeps the portal→browser leg open. It can't keep the Rancher leg open.
+- **Event shapes (test lab, Python runtime agent):**
+  - The first event is a `status-update` in state `submitted` that echoes the user's message (`role: "user"`).
+  - Partial text chunks carry `kagent_adk_partial: true` in the message metadata. Go runtime agents write `adk_partial` instead, so both keys are read.
+  - After the chunks, a complete step (partial `false` or missing) **repeats the whole text** of that step, plus any function-call parts.
+  - An `artifact-update` then repeats the last text as the final answer, before the final `completed` status-update.
+  - A turn can also end in `input-required` (human approval, an `adk_request_confirmation` call).
+- **A stream that ends without a `final: true` event was cut by a timeout in the chain.** The turn keeps running in the agent pod and is still stored, so it can be recovered later by polling the session's tasks. That recovery is not part of Plan 3.
 - The portal's own `http.Server` has no `WriteTimeout`, so long responses aren't cut by the portal.
 - Almost all users are cluster admins, so the "no access" path still can't be triggered on site.
 
@@ -34,7 +41,7 @@ As before, the build ends with a short live-test runbook and a report that is ty
 
 ## Non-goals
 
-- **Separate chat history per user (D1).** Deferred (decided 2026-11-20). The portal sends no `X-User-Id` or `user_id`, so kagent files every conversation under its default user (`admin@kagent.dev`). Conversations are separated only by their random `contextId`.
+- **Separate chat history per user (D1).** Deferred (decided 2026-11-20). The portal sends no `X-User-Id` or `user_id`, so kagent files every conversation under its default user (`admin@kagent.dev`). Conversations are separated only by their random `contextId`. Any later replay or recovery must read with `user_id=admin@kagent.dev`. In kagent, ownership isn't access control anyway: anyone with `services/proxy` can read any user's sessions.
 - Chat history that survives a page reload, or a list of past conversations. The conversation lives in the open page only.
 - Markdown rendering. Agent text is shown as plain text, with line breaks kept (Plan 5).
 - The non-streaming fallback (`message/send` with `blocking=false` plus `tasks/get` polling). It is built only if the live test shows streaming fails (see [If streaming fails on site](#if-streaming-fails-on-site)).
@@ -71,8 +78,9 @@ As before, the build ends with a short live-test runbook and a report that is ty
 
 ```yaml
 chat:
-  max_duration: 30m        # total cap per reply; matches kagent's streaming timeout on site
-  idle_timeout: 10m        # cap on silence between upstream events (kagent sends no heartbeats)
+  max_duration: 30m        # total cap per reply; matches kagent's streaming timeout on site (Helm default is 10m)
+  idle_timeout: 10m        # cap on silence between upstream events (kagent sends no heartbeats);
+                           # an ingress without timeout annotations cuts silence at 60s first
   max_message_bytes: 8192  # longest message a user can send
   heartbeat: 15s           # comment line sent to the browser while upstream is silent
   log_events: false        # log the shape (never content) of every upstream event; on for live tests
@@ -96,7 +104,8 @@ This is the only package that knows kagent's A2A paths and event shapes, so that
 - `Event` is a portal-side summary of one upstream JSON-RPC message. Parsing is tolerant: unknown kinds and fields are ignored.
   - `Kind`: `status-update`, `artifact-update`, `task`, `message`, or `error` (a JSON-RPC `error` object).
   - `TaskID`, `ContextID`, `State` (e.g. `working`, `completed`, `failed`, `input-required`), `Final`.
-  - `Texts []Text`: the text parts, each with a `Partial` flag (`metadata.adk_partial == true`).
+  - `Role`: the role of the enclosing message (`user` or `agent`), if any.
+  - `Texts []Text`: the text parts, each with a `Partial` flag (`kagent_adk_partial` or `adk_partial` is `true`, in the part's or the message's metadata).
   - `Tools []string`: the names of data parts that are function calls (any metadata key ending in `_type` whose value is `function_call`, name from `data.name`).
   - `ErrCode`, `ErrMessage` for JSON-RPC errors.
   - `Shape`: kind, state, part kinds and metadata **keys** (never values). It is used only for the debug log line below.
@@ -108,15 +117,15 @@ This is the only package that knows kagent's A2A paths and event shapes, so that
 1. Find the site token (`ok` status), as `clusters.Check` does. If the site isn't logged in, emit an `expired` error.
 2. Build a context capped by `chat.max_duration`. Call `PostStream` with `a2a.Path` and `a2a.StreamRequest`.
 3. Map pre-stream errors to the existing messages: 401 → `Your session on <site> has expired: log in again`, 403 → `You don't have kagent access on this cluster`, 404 → `kagent or the agent isn't installed on this cluster`, 503 → `kagent is installed but not running`, 502 or transport → `Cluster unreachable through Rancher`, other → `Unexpected response (HTTP <n>)`.
-4. Read events. Each `Next()` gets a fresh `chat.idle_timeout` deadline. The reader runs in a goroutine and the service selects on events, a heartbeat ticker and the deadlines. Emit:
-   - `progress {text, partial}` for each text in a non-final `status-update`
+4. Read events. Each `Next()` gets a fresh `chat.idle_timeout` deadline. The reader runs in a goroutine and the service selects on events, a heartbeat ticker and the deadlines. Texts in an event whose `Role` is `user` (the `submitted` echo) are skipped. Emit:
+   - `progress {text, partial}` for each text in a non-final `status-update`. A partial chunk carries only the new piece. A complete step repeats the full text of that step.
    - `tool {name}` for each tool name
-   - `answer {text}` for each text in an `artifact-update`, or in a final `status-update` or `message`
+   - `answer {text}` for each text in an `artifact-update`, or in a final `status-update` or `message`. The artifact usually repeats the last complete progress text. The browser handles that (see chat.js).
    - `state {state}` when the state changes
-   - `error {message}` for a JSON-RPC error (`Agent error: <message, truncated to 300 chars>`), or a state of `failed` or `rejected` (`The agent reported the task failed`)
+   - `error {message}` for a JSON-RPC error (`Agent error: <message, truncated to 300 chars>`), a state of `failed` or `rejected` (`The agent reported the task failed`), or a final state of `input-required` (`The agent is asking for approval, which the portal doesn't support yet`)
    - `ping` on each heartbeat while upstream is silent
-5. The reply ends on a final event, EOF, a JSON-RPC error, the total cap (`Reply took longer than <max_duration> and was stopped`), the silence cap (`No response from the agent for <idle_timeout>; stopped`), or the browser going away. It always finishes with `done {state, task_id, first_event_ms, total_ms, events}`.
-6. **Audit log**, one line per reply: `event=chat`, with `site`, `cluster`, `principal`, `context_id`, `task_id`, `http_code`, `first_event_ms`, `total_ms`, `events`, `result` (`completed`, `failed`, `error`, `timeout`, `idle-timeout`, `cancelled`, `expired`, `no-access`, `not-installed`, `not-running`, `unreachable`, `unexpected`) and `rancher_body` on unexpected codes. **No message text and no agent text.**
+5. The reply ends on a final event, EOF, a JSON-RPC error, the total cap (`Reply took longer than <max_duration> and was stopped`), the silence cap (`No response from the agent for <idle_timeout>; stopped`), or the browser going away. **EOF before any `final: true` event** means something in the chain cut the stream. It emits `The connection to the agent was cut before the reply finished`, and the turn may still finish inside kagent. It always finishes with `done {state, task_id, first_event_ms, total_ms, events}`.
+6. **Audit log**, one line per reply: `event=chat`, with `site`, `cluster`, `principal`, `context_id`, `task_id`, `http_code`, `first_event_ms`, `total_ms`, `events`, `result` (`completed`, `failed`, `input-required`, `error`, `cut-off`, `timeout`, `idle-timeout`, `cancelled`, `expired`, `no-access`, `not-installed`, `not-running`, `unreachable`, `unexpected`) and `rancher_body` on unexpected codes. **No message text and no agent text.**
 7. **Debug shapes:** when `chat.log_events: true` (default `false`), one `event=chat_event` line per upstream event, with `context_id`, `n`, `ms` since the start, and the event's `Shape`. This line lets the live test report what kagent actually sends without copying content. It is how the parsing assumptions above are checked.
 
 The text sent to the user is not logged. Agent text never reaches the logs.
@@ -164,9 +173,10 @@ The text sent to the user is not logged. Agent text never reaches the logs.
 
 - On Send, it disables the input and POSTs with `fetch`. It reads the response body, splits it into events and dispatches them by type.
 - Every piece of agent text goes into the DOM through `textContent`. Never through `innerHTML`.
-- `progress`: if `partial` is set, append to the current progress line, else start a new one. Progress lines are small and grey.
-- `tool`: a small grey `tool: <name>` line.
-- `answer`: the main agent block. If `done` arrives without any `answer`, the last progress text is promoted to the answer.
+- `progress`, partial: append to the open progress line, or start one if none is open.
+- `progress`, complete: **replace** the open progress line's text with this text and close it. If no line is open, start a new closed one. Without this, every step would appear twice. Progress lines are small and grey.
+- `tool`: a small grey `tool: <name>` line. It closes any open progress line.
+- `answer`: the main agent block. If the most recent progress line has exactly the same text, remove that line first, because the artifact repeats the last step. If `done` arrives without any `answer`, the last progress text is promoted to the answer.
 - `error`: a red line with the message.
 - `done`: the diagnostics line. Re-enable the input.
 - A non-200 answer to the POST maps to a short message by code: 401 → `Session expired: log in again` (with a link to `/`), 403 → `Page expired: reload`, 404/409 → `Cluster no longer available: reload`, 413 → `Message too long`, 429 → `A reply is already running in another tab`, other → `Request failed (HTTP <n>)`.
@@ -181,7 +191,14 @@ The text sent to the user is not logged. Agent text never reaches the logs.
 
 - It checks that `method` is `message/stream`, that the `contextId` is present, and that there is exactly one text part.
 - It records the last request body for tests.
-- It answers per cluster with a **script**: a list of `{Delay, Data}` steps written as SSE, or a status code, or a hang. Default script: `working` status-update → a tool function-call data part → two partial text chunks → an artifact-update with the full answer → a final `completed` status-update. The text echoes the user's message and the turn number for that `contextId`, so multi-turn can be seen working in the fake.
+- It answers per cluster with a **script**: a list of `{Delay, Data}` steps written as SSE, or a status code, or a hang. The default script follows the shapes seen in the test lab:
+  1. a `submitted` status-update echoing the user's message;
+  2. a `working` status-update;
+  3. a tool function-call data part;
+  4. two partial text chunks (`kagent_adk_partial: true`);
+  5. the complete step repeating the full text;
+  6. an artifact-update with the same text;
+  7. a final `completed` status-update. The text echoes the user's message and the turn number for that `contextId`, so multi-turn can be seen working in the fake.
 - It returns 403 for users in the cluster's `Deny` map. This is the no-access path, which can't be triggered on site.
 
 `cmd/fakerancher` seeds the default script on ready clusters, plus these:
@@ -190,20 +207,28 @@ The text sent to the user is not logged. Agent text never reaches the logs.
 - one that sends a JSON-RPC error
 - one that ends with `failed`
 - one that hangs forever (to see the idle cap with a short configured `idle_timeout`)
+- one whose stream ends after a working event with no final event (to see the cut-off message)
 
 ### Live test (`PLAN3-live-test.md`)
 
-The live test uses the same style as Plans 1 and 2: a "before you start" checklist, a test table and a short report format. Set `chat.log_events: true` for the run. Use test clusters, one long test at a time per site. The tests, roughly:
+The live test uses the same style as Plans 1 and 2: a "before you start" checklist, a test table and a short report format. Set `chat.log_events: true` for the run. Use test clusters, one long test at a time per site.
+
+Before starting, record per site:
+- the Rancher version (`GET /rancherversion`);
+- if anyone has access to the Rancher local cluster, whether the `rancher` ingress in `cattle-system` has the `proxy-read-timeout` and `proxy-send-timeout` annotations.
+
+The tests, roughly:
 
 - **C1 Streaming, per site (R1).** Ask a short question on one ready cluster per site. Do lines appear one by one, or all at once at the end? Record first-event ms, events and total time for each site.
 - **C2 Multi-turn (R2).** Ask a follow-up that only makes sense with the previous answer ("and the second one?"). Does the agent remember? The agent pod log should show no `SessionNotFoundError`.
 - **C3 Long, silent investigation (R1).** Ask something that makes the agent run tools for over 2 minutes, ideally with a single tool call longer than 60s. Does it complete? If it's cut off, record when and the error text. This is what finds a 60s ingress or load balancer timeout.
-- **C4 Stop.** Stop a running reply. The chat shows `Stopped`, the input comes back, and the next message works.
+- **C4 Stop.** Stop a running reply. The chat shows `Stopped`, the input comes back, and the next message works. Optionally, read the stopped turn's task state from kagent afterwards. If it reached `completed`, the turn kept running after the disconnect, and polling the session's tasks would work as a recovery path.
 - **C5 Two tabs.** Send in two tabs at once. The second shows `A reply is already running in another tab`.
 - **C6 New conversation.** The agent no longer knows the previous answer.
 - **C7 kagent down or missing** (if any). The cluster page doesn't offer chat.
 - **C8 Expired site token** (optional). Log out at Rancher for one site in another tab, then send. The chat shows the expired message for that site only.
 - **C9 Event shapes.** From the `event=chat_event` lines of one C1 reply, write down the distinct shapes (kind, state, part kinds, metadata keys). This confirms or corrects the parsing in this design.
+- **C10 Silent-gap baseline, per site (R1).** Without kagent, hold a request open through `/k8s/clusters/<id>` with no data for 150s: a watch on a ConfigMap that doesn't exist, with `timeoutSeconds=150`. It should close at about 150s. A close at 60s points to the ingress or load balancer and explains a C3 cut-off.
 
 The report records, per site: first-event ms, total ms, events, whether streaming was live (`y`/`n`), and the C3 outcome with the cut-off time if there was one.
 
@@ -214,7 +239,8 @@ C1 and C3 decide this:
 | Observed | Meaning | Next step (a follow-up plan, not Plan 3) |
 | --- | --- | --- |
 | Everything arrives at once at the end | Something in the chain buffers (ingress `proxy-buffering`, or a load balancer) | Ask the Rancher site owners to disable buffering for `/k8s/clusters/` (E3). The portal side already sends `X-Accel-Buffering: no` towards the browser. |
-| Cut off at ~60s, or at a load balancer idle value | Ingress or load balancer read timeout | Raise the timeout on that site, or build the non-blocking `message/send` + `tasks/get` fallback |
+| Cut off at ~60s of silence, or at a load balancer idle value (C10 also closes early) | Ingress or load balancer read timeout | Ask the site owners to add the 1800s ingress annotations, or build the fallback: on a cut stream, poll `/api/sessions/<id>/tasks` until the turn ends |
+| Cut off at ~10m while data is still flowing | kagent's `controller.streaming.timeout` is still the 600s Helm default on that site | Raise it through Fleet, or accept 10m turns |
 | Cut off at 30m | The kagent cap, as expected | None. It matches `chat.max_duration`. |
 
 ## Left to the builder
