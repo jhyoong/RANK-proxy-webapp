@@ -298,9 +298,6 @@ func (s *Service) event(contextID string, ev a2a.Event, r *reply, emit func(Out)
 		return true
 	}
 
-	for _, name := range ev.Tools {
-		emit(Out{Type: "tool", Data: Tool{Name: name}})
-	}
 	if ev.Role != "user" { // the submitted echo of the user's own message
 		answer := ev.Final || ev.Kind == "message" || ev.Kind == "artifact-update"
 		for _, t := range ev.Texts {
@@ -310,6 +307,11 @@ func (s *Service) event(contextID string, ev a2a.Event, r *reply, emit func(Out)
 				emit(Out{Type: "progress", Data: Progress{Text: t.Text, Partial: t.Partial}})
 			}
 		}
+	}
+	// Tools follow the texts: the browser closes the open partial line on a
+	// tool, so a complete step's text must land first to replace it.
+	for _, name := range ev.Tools {
+		emit(Out{Type: "tool", Data: Tool{Name: name}})
 	}
 	if ev.State != "" && ev.State != r.state {
 		r.state = ev.State

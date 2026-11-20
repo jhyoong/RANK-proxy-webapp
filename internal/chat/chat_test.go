@@ -524,3 +524,46 @@ func TestSend_LogFields(t *testing.T) {
 		t.Fatalf("chat_event lines = %d", n)
 	}
 }
+
+func TestSend_CompleteStepTextBeforeTools(t *testing.T) {
+	msg := func(partial, parts string) string {
+		return `{"jsonrpc":"2.0","id":"1","result":{"kind":"status-update","taskId":"t1","contextId":"c","final":false,` +
+			`"status":{"state":"working","message":{"kind":"message","messageId":"m","role":"agent",` +
+			`"metadata":{"kagent_adk_partial":` + partial + `},"parts":[` + parts + `]}}}}`
+	}
+	text := func(s string) string { return `{"kind":"text","text":"` + s + `"}` }
+	call := `{"kind":"data","data":{"id":"call_1","name":"k8s_get_resources","args":{}},"metadata":{"kagent_type":"function_call"}}`
+	steps := []ranchertest.Step{
+		step(msg("true", text("Let me "))),
+		step(msg("true", text("check."))),
+		step(msg("false", text("Let me check.")+","+call)),
+		step(finalState("completed")),
+	}
+	e := setup(t, ranchertest.FakeCluster{ChatSteps: steps}, baseCfg())
+	outs := e.send(t, context.Background(), "hi", a2a.NewUUID())
+	want := []string{"progress", "state", "progress", "progress", "tool", "state", "done"}
+	if got := types(outs); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("types = %v, want %v", got, want)
+	}
+	if p := outs[3].Data.(chat.Progress); p.Partial || p.Text != "Let me check." {
+		t.Fatalf("complete step = %+v", p)
+	}
+	if n := outs[4].Data.(chat.Tool).Name; n != "k8s_get_resources" {
+		t.Fatalf("tool = %q", n)
+	}
+}
+
+func TestSend_HeaderTimeout(t *testing.T) {
+	cfg := baseCfg()
+	cfg.IdleTimeout = 150 * time.Millisecond
+	// Delay applies to every request (login included); it is far above IdleTimeout.
+	e := setup(t, ranchertest.FakeCluster{}, cfg)
+	e.f.Delay = 2 * time.Second
+	start := time.Now()
+	outs := e.send(t, context.Background(), "hi", a2a.NewUUID())
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("took %v", d)
+	}
+	wantSingleError(t, outs, "No response from the agent for 150ms; stopped")
+	wantResult(t, e.logs.String(), "idle-timeout")
+}

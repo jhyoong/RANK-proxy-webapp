@@ -11,7 +11,7 @@
   var ctrl = null;          // AbortController of the running reply
   var open = null;          // progress line still receiving partial chunks
   var lastProgress = null;  // most recent progress line
-  var answered = false, gotDone = false;
+  var answered = false, errored = false, gotDone = false;
 
   function line(cls, text) {
     var d = document.createElement('div');
@@ -68,12 +68,13 @@
         line('agent', d.text);
         break;
       case 'error':
+        errored = true;
         open = null;
         line('err', d.message);
         break;
       case 'done':
         gotDone = true;
-        if (!answered && lastProgress) lastProgress.className = 'agent';
+        if (!answered && !errored && lastProgress) lastProgress.className = 'agent';
         line('diag', diag(d));
         break;
     }
@@ -129,7 +130,7 @@
     line('you', text);
     msg.value = '';
     open = lastProgress = null;
-    answered = gotDone = false;
+    answered = errored = gotDone = false;
     ctrl = new AbortController();
     var signal = ctrl.signal;
     busy(true);
