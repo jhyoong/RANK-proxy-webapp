@@ -20,18 +20,20 @@ const localCluster = "local"
 
 // Service lists clusters (and, later, checks kagent) using each user's own token.
 type Service struct {
-	clients map[string]*rancher.Client
-	kagent  config.KagentConfig
-	log     *slog.Logger
+	clients      map[string]*rancher.Client
+	kagent       config.KagentConfig
+	includeLocal bool
+	log          *slog.Logger
 }
 
-// New builds a Service over the configured site clients.
-func New(clients []*rancher.Client, kagent config.KagentConfig, log *slog.Logger) *Service {
+// New builds a Service over the configured site clients. Each site's "local"
+// cluster is dropped from lists unless includeLocal is set.
+func New(clients []*rancher.Client, kagent config.KagentConfig, includeLocal bool, log *slog.Logger) *Service {
 	m := make(map[string]*rancher.Client, len(clients))
 	for _, c := range clients {
 		m[c.Name] = c
 	}
-	return &Service{clients: m, kagent: kagent, log: log}
+	return &Service{clients: m, kagent: kagent, includeLocal: includeLocal, log: log}
 }
 
 // Row is one cluster on one site.
@@ -54,7 +56,7 @@ type SiteList struct {
 type Listing struct {
 	Fetched time.Time
 	Sites   []SiteList // config order
-	Rows    []Row      // merged, local dropped, sorted
+	Rows    []Row      // merged, local dropped (unless included), sorted
 }
 
 // List fetches every logged-in site in parallel and merges the results.
@@ -90,7 +92,7 @@ func (s *Service) List(ctx context.Context, sites []auth.SiteResult) *Listing {
 			} else {
 				sl.Status = "ok"
 				for _, cc := range cs {
-					if cc.ID == localCluster {
+					if cc.ID == localCluster && !s.includeLocal {
 						continue
 					}
 					perSite[i] = append(perSite[i], Row{Site: sr.Site, Cluster: cc})

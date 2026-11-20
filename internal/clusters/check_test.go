@@ -29,7 +29,7 @@ func checkSetup(t *testing.T, timeout time.Duration, c ranchertest.FakeCluster) 
 	log := slog.New(slog.NewJSONHandler(logs, nil))
 	res := auth.New([]*rancher.Client{cli}, time.Hour, log).Login(context.Background(), "jdoe", "pw")
 	row := clusters.Row{Site: "site-1", Cluster: rancher.Cluster{ID: c.ID, DisplayName: c.DisplayName, Connected: true}}
-	return env{clusters.New([]*rancher.Client{cli}, kagentCfg, log), res.Sites, logs}, f, row
+	return env{clusters.New([]*rancher.Client{cli}, kagentCfg, false, log), res.Sites, logs}, f, row
 }
 
 func TestCheck_Ready(t *testing.T) {
