@@ -1,0 +1,16 @@
+{{define "content"}}
+<h2>Logged out</h2>
+<table>
+  <thead><tr><th>Site</th><th>Logged out</th><th>Revoked</th><th>Checks</th><th>Error</th></tr></thead>
+  <tbody>
+  {{range .Logout}}
+  <tr class="{{if and .LoggedOut .Revoked}}status-ok{{else}}status-rejected{{end}}">
+    <td>{{.Site}}</td><td>{{if .LoggedOut}}yes{{else}}no{{end}}</td><td>{{if .Revoked}}yes{{else}}no{{end}}</td><td>{{.Attempts}}</td><td>{{.Error}}</td>
+  </tr>
+  {{else}}
+  <tr><td colspan="5">No site tokens to revoke.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+<p><a href="/">Log in again</a></p>
+{{end}}

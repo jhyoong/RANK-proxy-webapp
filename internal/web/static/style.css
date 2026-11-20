@@ -1,0 +1,21 @@
+body { font-family: system-ui, sans-serif; margin: 0; color: #1d1d1f; background: #f6f7f9; }
+header { display: flex; align-items: baseline; gap: .75rem; padding: .75rem 1.5rem; background: #1f2937; color: #fff; }
+header h1 { font-size: 1.1rem; margin: 0; }
+.tag { font-size: .75rem; background: #374151; padding: .1rem .5rem; border-radius: .25rem; }
+main { padding: 1.5rem; }
+footer { padding: .75rem 1.5rem; color: #6b7280; font-size: .8rem; }
+form.login { max-width: 22rem; display: grid; gap: .75rem; background: #fff; padding: 1.5rem; border-radius: .5rem; box-shadow: 0 1px 3px #0002; }
+label { display: grid; gap: .25rem; font-size: .9rem; }
+input { padding: .45rem; font-size: 1rem; border: 1px solid #cbd5e1; border-radius: .25rem; }
+button { padding: .5rem 1rem; font-size: 1rem; border: 0; border-radius: .25rem; background: #2563eb; color: #fff; cursor: pointer; }
+table { border-collapse: collapse; background: #fff; margin: 1rem 0; font-size: .85rem; }
+th, td { border: 1px solid #e5e7eb; padding: .4rem .6rem; text-align: left; vertical-align: top; }
+th { background: #f1f5f9; }
+code { font-size: .8rem; word-break: break-all; }
+.error { color: #b91c1c; }
+.warning { background: #fef3c7; border-left: 4px solid #d97706; padding: .5rem .75rem; }
+tr.status-ok td:nth-child(2) { color: #15803d; font-weight: 600; }
+tr.status-rejected td, tr.status-unavailable td { background: #fef2f2; }
+tr.status-rejected td:nth-child(2), tr.status-unavailable td:nth-child(2) { color: #b91c1c; font-weight: 600; }
+tr.status-skipped td { color: #6b7280; }
+.meta { color: #6b7280; font-size: .85rem; }

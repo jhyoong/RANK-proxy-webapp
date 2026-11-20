@@ -1,0 +1,41 @@
+# Example portal configuration. Copy, edit and mount at /etc/portal/config.yaml
+# (or pass -config / PORTAL_CONFIG). Placeholder hosts only; no secrets belong here.
+
+# Address the portal listens on.
+listen: ":8080"
+
+# Add the Secure attribute to the session cookie. Keep true; set false only
+# when testing over plain HTTP on a hostname other than localhost.
+cookie_secure: true
+
+# Optional HTTPS on the portal itself. Leave both empty when TLS ends at an
+# ingress or when testing through kubectl port-forward.
+tls:
+  cert_file: ""
+  key_file: ""
+
+session:
+  # Session ends after this long without a request.
+  idle_timeout: 30m
+  # Session ends this long after login, regardless of activity. Also sent to
+  # Rancher as the requested token lifetime (ttl).
+  absolute_timeout: 8h
+
+login:
+  # Timeout for each request to a Rancher site.
+  timeout: 15s
+
+# Rancher sites. Order matters: the first site is tried first at login, and a
+# rejected password there stops the login (one AD attempt per portal login).
+# url: https only, no path. ca_file: PEM bundle for that site's certificate;
+# leave empty to use the image's system roots.
+sites:
+  - name: site-1
+    url: https://rancher-1.example.internal
+    ca_file: /etc/portal/ca/site-1.pem
+  - name: site-2
+    url: https://rancher-2.example.internal
+    ca_file: /etc/portal/ca/site-2.pem
+  - name: site-3
+    url: https://rancher-3.example.internal
+    ca_file: /etc/portal/ca/site-3.pem
