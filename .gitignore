@@ -1,2 +1,6 @@
 .claude/settings.local.json
 /portal
+/fakerancher
+/dev/
+# On-site findings: keep out of the public repo
+docs/quick-findings.md

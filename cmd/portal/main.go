@@ -1,57 +1,121 @@
-// Command portal is the kagent chat portal. This is a placeholder server so the
-// build pipeline has something to package; see docs/design.md for the plan.
+// Command portal is the kagent chat portal. Plan 1 implements only the
+// multi-site Rancher login flow; see docs/plans/PLAN1.md.
 package main
 
 import (
 	"context"
 	"errors"
+	"flag"
+	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/config"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/rancher"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/session"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/web"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
 func main() {
-	addr := os.Getenv("PORTAL_ADDR")
-	if addr == "" {
-		addr = ":8080"
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok\n"))
-	})
-	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(version + "\n"))
-	})
-
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if err := run(ctx, os.Args[1:], os.Stdout, nil); err != nil {
+		fmt.Fprintln(os.Stderr, "portal:", err)
+		os.Exit(1)
+	}
+}
+
+// run starts the portal and blocks until ctx is cancelled. If ready is not
+// nil, the bound listen address is sent on it once the server accepts
+// connections.
+func run(ctx context.Context, args []string, stdout io.Writer, ready chan<- string) error {
+	defaultPath := os.Getenv("PORTAL_CONFIG")
+	if defaultPath == "" {
+		defaultPath = "/etc/portal/config.yaml"
+	}
+	fsFlags := flag.NewFlagSet("portal", flag.ContinueOnError)
+	cfgPath := fsFlags.String("config", defaultPath, "path to config file (env PORTAL_CONFIG)")
+	if err := fsFlags.Parse(args); err != nil {
+		return err
+	}
+
+	log := slog.New(slog.NewJSONHandler(stdout, nil))
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+
+	var clients []*rancher.Client
+	var siteAttrs []any
+	for _, s := range cfg.Sites {
+		c, err := rancher.NewClient(s, cfg.Login.Timeout)
+		if err != nil {
+			return err
+		}
+		clients = append(clients, c)
+		siteAttrs = append(siteAttrs, slog.Group(s.Name, "url", s.URL, "ca_file", s.CAFile))
+	}
+
+	store := session.NewStore(cfg.Session.IdleTimeout, cfg.Session.AbsoluteTimeout, time.Now)
+	handler, err := web.New(cfg, auth.New(clients, cfg.Session.AbsoluteTimeout, log), store, version, log)
+	if err != nil {
+		return err
+	}
+
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	useTLS := cfg.TLS.CertFile != ""
+	log.Info("portal listening", "version", version, "listen", ln.Addr().String(), "tls", useTLS,
+		"idle_timeout", cfg.Session.IdleTimeout.String(), "absolute_timeout", cfg.Session.AbsoluteTimeout.String(),
+		"cookie_secure", cfg.SecureCookies(), slog.Group("sites", siteAttrs...))
 
 	go func() {
-		slog.Info("portal listening", "addr", addr, "version", version)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server failed", "err", err)
-			os.Exit(1)
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				store.Sweep()
+			}
 		}
 	}()
 
-	<-ctx.Done()
+	errc := make(chan error, 1)
+	go func() {
+		if useTLS {
+			errc <- srv.ServeTLS(ln, cfg.TLS.CertFile, cfg.TLS.KeyFile)
+		} else {
+			errc <- srv.Serve(ln)
+		}
+	}()
+	if ready != nil {
+		ready <- ln.Addr().String()
+	}
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("shutdown failed", "err", err)
-	}
+	return srv.Shutdown(shutdownCtx)
 }

@@ -1,0 +1,111 @@
+# Example manifests for the Plan 1 live test (login flow only).
+# Replace every <placeholder>. No secrets live here: the portal holds no
+# credentials of its own; users' Rancher tokens stay in pod memory.
+#
+#   kubectl apply -f deploy/portal.yaml
+#   kubectl -n kagent-portal port-forward svc/portal 8080:80
+#   open http://localhost:8080   (localhost counts as a secure context, so
+#                                 Secure cookies work over plain HTTP)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kagent-portal
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: portal-config
+  namespace: kagent-portal
+data:
+  config.yaml: |
+    listen: ":8080"
+    # Keep true for port-forward to localhost. Set false ONLY if testing over
+    # plain HTTP on a non-localhost name (browsers drop Secure cookies there).
+    cookie_secure: true
+    session:
+      idle_timeout: 30m
+      absolute_timeout: 8h
+    login:
+      timeout: 15s
+    sites:
+      - name: <site-1-name>
+        url: https://<rancher-site-1-host>
+        ca_file: /etc/portal/ca/site-1.pem
+      - name: <site-2-name>
+        url: https://<rancher-site-2-host>
+        ca_file: /etc/portal/ca/site-2.pem
+      - name: <site-3-name>
+        url: https://<rancher-site-3-host>
+        ca_file: /etc/portal/ca/site-3.pem
+  # Full CA chain (PEM) that signs each Rancher site's certificate.
+  site-1.pem: |
+    -----BEGIN CERTIFICATE-----
+    <site-1 CA>
+    -----END CERTIFICATE-----
+  site-2.pem: |
+    -----BEGIN CERTIFICATE-----
+    <site-2 CA>
+    -----END CERTIFICATE-----
+  site-3.pem: |
+    -----BEGIN CERTIFICATE-----
+    <site-3 CA>
+    -----END CERTIFICATE-----
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal
+  namespace: kagent-portal
+  labels: {app: portal}
+spec:
+  replicas: 1 # in-memory sessions: must stay at 1 for Plan 1
+  selector:
+    matchLabels: {app: portal}
+  template:
+    metadata:
+      labels: {app: portal}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: portal
+          image: <internal-registry>/rank-proxy-webapp@sha256:<digest>
+          args: ["-config", "/etc/portal/config.yaml"]
+          ports:
+            - {name: http, containerPort: 8080}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/portal, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: portal-config
+            items:
+              - {key: config.yaml, path: config.yaml}
+              - {key: site-1.pem, path: ca/site-1.pem}
+              - {key: site-2.pem, path: ca/site-2.pem}
+              - {key: site-3.pem, path: ca/site-3.pem}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal
+  namespace: kagent-portal
+spec:
+  selector: {app: portal}
+  ports:
+    - {name: http, port: 80, targetPort: http}
