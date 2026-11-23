@@ -75,8 +75,9 @@ func run(ctx context.Context, args []string, stdout io.Writer, ready chan<- stri
 		siteAttrs = append(siteAttrs, slog.Group(s.Name, "url", s.URL, "ca_file", s.CAFile))
 	}
 
-	store := session.NewStore(cfg.Session.IdleTimeout, cfg.Session.AbsoluteTimeout, time.Now)
-	handler, err := web.New(cfg, auth.New(clients, cfg.Session.AbsoluteTimeout, log), clusters.New(apiClients, cfg.Kagent, cfg.Clusters.IncludeLocal, log),
+	store := session.NewStore(cfg.Session.IdleTimeout, cfg.Session.AbsoluteTimeout, cfg.Session.MaxPerUser, time.Now)
+	authn := auth.New(clients, cfg.Session.AbsoluteTimeout, log)
+	handler, err := web.New(cfg, authn, clusters.New(apiClients, cfg.Kagent, cfg.Clusters.IncludeLocal, log),
 		chat.New(apiClients, cfg.Kagent, cfg.Chat, log), store, version, log)
 	if err != nil {
 		return err
@@ -86,11 +87,19 @@ func run(ctx context.Context, args []string, stdout io.Writer, ready chan<- stri
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	// No ReadTimeout or WriteTimeout: a server-wide read deadline would cancel
+	// the request context during a long SSE reply, and a write timeout would
+	// cut the reply off. Handlers set per-request body read deadlines instead.
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
 	useTLS := cfg.TLS.CertFile != ""
 	log.Info("portal listening", "version", version, "listen", ln.Addr().String(), "tls", useTLS,
 		"idle_timeout", cfg.Session.IdleTimeout.String(), "absolute_timeout", cfg.Session.AbsoluteTimeout.String(),
 		"cookie_secure", cfg.SecureCookies(), "kagent.agent_name", cfg.Kagent.AgentName, slog.Group("sites", siteAttrs...))
+	if len(cfg.Login.TrustedProxies) == 0 && cfg.SecureCookies() {
+		// Secure cookies imply HTTPS, usually terminated by an ingress.
+		log.Warn("login.trusted_proxies is empty: behind an ingress the per-IP login limit sees the ingress address for every user, so all users share one bucket",
+			"event", "config_warning")
+	}
 
 	go func() {
 		t := time.NewTicker(time.Minute)
@@ -100,7 +109,14 @@ func run(ctx context.Context, args []string, stdout io.Writer, ready chan<- stri
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				store.Sweep()
+				ended := store.Sweep()
+				if len(ended) > 0 {
+					go func() {
+						rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						web.Revoke(rctx, authn, ended, log)
+					}()
+				}
 			}
 		}
 	}()
@@ -127,5 +143,11 @@ func run(ctx context.Context, args []string, stdout io.Writer, ready chan<- stri
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	// Revoke every remaining session's tokens. The 15s + 10s budgets stay
+	// inside Kubernetes' default 30s grace period.
+	revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelRevoke()
+	web.Revoke(revokeCtx, authn, store.Drain(), log)
+	return shutdownErr
 }

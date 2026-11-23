@@ -44,9 +44,20 @@ docker run --rm -p 8080:8080 -v $PWD/my-config:/etc/portal:ro portal:local
 
 For the on-site live test (the `kagent`, `clusters` and `api` blocks in the ConfigMap are the ones to adjust), see [docs/plans/PLAN1-live-test.md](docs/plans/PLAN1-live-test.md), [docs/plans/PLAN2-live-test.md](docs/plans/PLAN2-live-test.md) and [deploy/portal.yaml](deploy/portal.yaml).
 
+## Security
+
+- **Login limits** (`login:` block): `max_attempts_per_user: 3`, `max_attempts_per_ip: 20`, `attempt_window: 15m`. Each counted attempt restarts that key's window, so set `attempt_window` at least as long as AD's lockout observation window. A blocked login never reaches Rancher. Keep `max_attempts_per_user` below the AD lockout threshold minus attempts made in the Rancher UI directly.
+- **`login.trusted_proxies`**: CIDRs of the ingress controller's pods. Behind an ingress, `RemoteAddr` is the ingress pod, so without this every user shares one IP bucket. A peer in these CIDRs has its `X-Forwarded-For` trusted for the real client IP; from any other peer it is ignored.
+- **`session.max_per_user: 5`**: a 6th login ends the user's oldest session and revokes its Rancher tokens.
+- **Token revocation**: Rancher tokens are revoked when a session expires (swept every minute), is evicted, on re-login, and on pod shutdown (a 10s pass after the HTTP server stops; the Deployment sets `terminationGracePeriodSeconds: 30`).
+- **Browser protections**: cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` when `cookie_secure` is true; non-safe requests pass through `http.CrossOriginProtection`; HSTS is sent when `cookie_secure` is true.
+- **NetworkPolicy** in [deploy/portal.yaml](deploy/portal.yaml): ingress only on TCP 8080 from `<ingress-controller-namespace>`; egress only TCP 443 to `<rancher-site-1-cidr>`, `<rancher-site-2-cidr>`, `<rancher-site-3-cidr>`, and DNS (UDP/TCP 53) to `kube-system` pods labelled `k8s-app: kube-dns`. Replace the placeholders. `kubectl port-forward` bypasses NetworkPolicy.
+- **TLS**: the ingress must terminate TLS. HSTS and `Secure` cookies assume HTTPS.
+- **Supply chain**: CI runs `govulncheck` and a Trivy scan; the Dockerfile pins the distroless base by digest.
+
 ## Image pipeline
 
-`.github/workflows/image.yml` runs `go vet` and `go test`, builds a `linux/amd64` image, scans it with Trivy (fails on fixable HIGH/CRITICAL), then pushes.
+`.github/workflows/image.yml` runs `go vet`, `go test` and `govulncheck`, builds a `linux/amd64` image, scans it with Trivy (fails on fixable HIGH/CRITICAL), then pushes.
 
 | Trigger | Pushed tags |
 | --- | --- |

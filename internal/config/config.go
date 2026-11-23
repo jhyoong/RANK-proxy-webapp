@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -39,12 +40,22 @@ type TLSConfig struct {
 type SessionConfig struct {
 	IdleTimeout     time.Duration `yaml:"idle_timeout"`
 	AbsoluteTimeout time.Duration `yaml:"absolute_timeout"`
+	// MaxPerUser caps live sessions per user; the oldest is ended when
+	// exceeded. Default 5.
+	MaxPerUser int `yaml:"max_per_user"`
 }
 
 // LoginConfig holds settings for calls to Rancher.
 type LoginConfig struct {
 	// Timeout applies to each request to a Rancher site.
 	Timeout time.Duration `yaml:"timeout"`
+	// MaxAttemptsPerUser and MaxAttemptsPerIP cap login attempts per
+	// username and per client IP within AttemptWindow.
+	MaxAttemptsPerUser int           `yaml:"max_attempts_per_user"`
+	MaxAttemptsPerIP   int           `yaml:"max_attempts_per_ip"`
+	AttemptWindow      time.Duration `yaml:"attempt_window"`
+	// TrustedProxies are CIDRs whose X-Forwarded-For header is believed.
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 // KagentConfig locates kagent and its agent inside each downstream cluster.
@@ -127,8 +138,20 @@ func (c *Config) applyDefaults() {
 	if c.Session.AbsoluteTimeout == 0 {
 		c.Session.AbsoluteTimeout = 8 * time.Hour
 	}
+	if c.Session.MaxPerUser == 0 {
+		c.Session.MaxPerUser = 5
+	}
 	if c.Login.Timeout == 0 {
 		c.Login.Timeout = 15 * time.Second
+	}
+	if c.Login.MaxAttemptsPerUser == 0 {
+		c.Login.MaxAttemptsPerUser = 3
+	}
+	if c.Login.MaxAttemptsPerIP == 0 {
+		c.Login.MaxAttemptsPerIP = 20
+	}
+	if c.Login.AttemptWindow == 0 {
+		c.Login.AttemptWindow = 15 * time.Minute
 	}
 	k := &c.Kagent
 	for _, f := range []struct {
@@ -172,6 +195,17 @@ func (c *Config) validate() error {
 	}
 	if c.Session.IdleTimeout < 0 || c.Session.AbsoluteTimeout < 0 || c.Login.Timeout < 0 {
 		return errors.New("session/login: timeouts must be positive")
+	}
+	if c.Session.MaxPerUser < 0 {
+		return errors.New("session.max_per_user must not be negative")
+	}
+	if c.Login.MaxAttemptsPerUser < 0 || c.Login.MaxAttemptsPerIP < 0 || c.Login.AttemptWindow < 0 {
+		return errors.New("login: max_attempts_per_user, max_attempts_per_ip and attempt_window must not be negative")
+	}
+	for _, p := range c.Login.TrustedProxies {
+		if _, err := netip.ParsePrefix(p); err != nil {
+			return fmt.Errorf("login.trusted_proxies: %q: %w", p, err)
+		}
 	}
 	if c.Session.IdleTimeout > c.Session.AbsoluteTimeout {
 		return errors.New("session: idle_timeout must not exceed absolute_timeout")

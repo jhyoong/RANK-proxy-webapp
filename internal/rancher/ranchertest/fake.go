@@ -60,17 +60,18 @@ type Fake struct {
 	// collection (as rancher/apiserver does) instead of under pagination.
 	TopLevelContinue bool
 
-	mu         sync.Mutex
-	tokens     map[string]string // bearer -> username
-	lag        map[string]int    // bearer -> remaining successful calls after logout
-	loginCalls int
-	lastBody   map[string]any
-	lastCT     string
-	listCalls  int
-	lastSSAR   map[string]any
-	lastCard   string
-	ssarCalls  int
-	cardCalls  int
+	mu          sync.Mutex
+	tokens      map[string]string // bearer -> username
+	lag         map[string]int    // bearer -> remaining successful calls after logout
+	loginCalls  int
+	logoutCalls int
+	lastBody    map[string]any
+	lastCT      string
+	listCalls   int
+	lastSSAR    map[string]any
+	lastCard    string
+	ssarCalls   int
+	cardCalls   int
 
 	chatCalls     int
 	chatBody      map[string]any
@@ -127,6 +128,13 @@ func (f *Fake) LoginCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.loginCalls
+}
+
+// LogoutCalls returns how many authenticated logout requests the fake received.
+func (f *Fake) LogoutCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.logoutCalls
 }
 
 // LastLoginBody returns the decoded body of the most recent login request.
@@ -431,6 +439,7 @@ func (f *Fake) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	f.mu.Lock()
+	f.logoutCalls++
 	switch {
 	case f.IgnoreLogout:
 	case f.RevokeLag > 0:

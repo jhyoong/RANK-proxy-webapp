@@ -192,3 +192,45 @@ func TestLoad_ExampleOnlyFailsOnCA(t *testing.T) {
 		t.Fatalf("expected only a ca_file error, got %v", err)
 	}
 }
+
+func TestLoginDefaults(t *testing.T) {
+	c, err := Load(writeConfig(t, minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Login.MaxAttemptsPerUser != 3 || c.Login.MaxAttemptsPerIP != 20 || c.Login.AttemptWindow != 15*time.Minute {
+		t.Fatalf("bad defaults: %+v", c.Login)
+	}
+}
+
+func TestLoginNegativeRejected(t *testing.T) {
+	for _, k := range []string{"max_attempts_per_user: -1", "max_attempts_per_ip: -1", "attempt_window: -1m"} {
+		if _, err := Load(writeConfig(t, "login:\n  "+k+"\n"+minimal)); err == nil {
+			t.Fatalf("%s accepted", k)
+		}
+	}
+}
+
+func TestTrustedProxiesBadCIDRRejected(t *testing.T) {
+	if _, err := Load(writeConfig(t, "login:\n  trusted_proxies: [\"10.0.0.0/8\", \"nope\"]\n"+minimal)); err == nil {
+		t.Fatal("bad CIDR accepted")
+	}
+	c, err := Load(writeConfig(t, "login:\n  trusted_proxies: [\"10.0.0.0/8\"]\n"+minimal))
+	if err != nil || len(c.Login.TrustedProxies) != 1 {
+		t.Fatalf("good CIDR: %v %+v", err, c)
+	}
+}
+
+func TestSessionMaxPerUser(t *testing.T) {
+	c, err := Load(writeConfig(t, minimal))
+	if err != nil || c.Session.MaxPerUser != 5 {
+		t.Fatalf("default: %v %+v", err, c.Session)
+	}
+	c, err = Load(writeConfig(t, "session:\n  max_per_user: 2\n"+minimal))
+	if err != nil || c.Session.MaxPerUser != 2 {
+		t.Fatalf("set: %v %+v", err, c.Session)
+	}
+	if _, err := Load(writeConfig(t, "session:\n  max_per_user: -1\n"+minimal)); err == nil {
+		t.Fatal("negative accepted")
+	}
+}

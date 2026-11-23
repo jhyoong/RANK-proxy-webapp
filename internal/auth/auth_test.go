@@ -325,3 +325,48 @@ func TestLogout_TokenStillAccepted(t *testing.T) {
 		t.Fatalf("got %+v", out[0])
 	}
 }
+
+func TestLogin_TimeoutFlag(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := strings.Replace(closed.URL, "http://", "https://", 1)
+	closed.Close()
+	t.Run("connection refused", func(t *testing.T) {
+		e := setup(t, []*ranchertest.Fake{nil}, 5*time.Second, closedURL)
+		r := e.a.Login(context.Background(), "jdoe", "pw")
+		if r.Sites[0].Status != auth.StatusUnavailable || r.Sites[0].Timeout {
+			t.Fatalf("got %+v", r.Sites[0])
+		}
+	})
+	for code, want := range map[int]bool{502: false, 503: false, 504: true} {
+		fs := fakes()[:1]
+		fs[0].LoginStatus = code
+		e := setup(t, fs, 5*time.Second)
+		r := e.a.Login(context.Background(), "jdoe", "pw")
+		if r.Sites[0].Status != auth.StatusUnavailable || r.Sites[0].Timeout != want {
+			t.Fatalf("code %d: got %+v", code, r.Sites[0])
+		}
+	}
+	t.Run("client timeout", func(t *testing.T) {
+		fs := fakes()[:1]
+		fs[0].Delay = time.Second
+		e := setup(t, fs, 200*time.Millisecond)
+		r := e.a.Login(context.Background(), "jdoe", "pw")
+		if r.Sites[0].Status != auth.StatusUnavailable || !r.Sites[0].Timeout {
+			t.Fatalf("got %+v", r.Sites[0])
+		}
+		if !strings.Contains(e.logs.String(), `"timeout":true`) {
+			t.Fatalf("log: %s", e.logs.String())
+		}
+	})
+	t.Run("context deadline", func(t *testing.T) {
+		fs := fakes()[:1]
+		fs[0].Delay = time.Second
+		e := setup(t, fs, 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		r := e.a.Login(ctx, "jdoe", "pw")
+		if r.Sites[0].Status != auth.StatusUnavailable || !r.Sites[0].Timeout {
+			t.Fatalf("got %+v", r.Sites[0])
+		}
+	})
+}
