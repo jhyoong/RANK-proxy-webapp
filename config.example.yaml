@@ -20,10 +20,26 @@ session:
   # Session ends this long after login, regardless of activity. Also sent to
   # Rancher as the requested token lifetime (ttl).
   absolute_timeout: 8h
+  # Most live sessions per user. A further login ends the oldest one and
+  # revokes its Rancher tokens.
+  max_per_user: 5
 
 login:
   # Timeout for each request to a Rancher site.
   timeout: 15s
+  # Login attempts allowed per username and per client IP within
+  # attempt_window (0 or unset uses the default; negative is rejected). A
+  # blocked login makes no call to Rancher. Keep max_attempts_per_user below
+  # the AD lockout threshold minus the attempts people make in the Rancher UI
+  # directly. attempt_window should be at least AD's lockout observation
+  # window; it restarts at each counted attempt.
+  max_attempts_per_user: 3
+  max_attempts_per_ip: 20
+  attempt_window: 15m
+  # CIDRs of reverse proxies whose X-Forwarded-For header is trusted for the
+  # client IP. Set this to the ingress controller's pod CIDR; without it every
+  # user behind the ingress shares one IP bucket.
+  trusted_proxies: []
 
 # Rancher sites. Order matters: the first site is tried first at login, and a
 # rejected password there stops the login (one AD attempt per portal login).

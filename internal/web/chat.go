@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jhyoong/RANK-proxy-webapp/internal/a2a"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
@@ -45,6 +46,7 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := s.cfg.Chat.MaxMessageBytes
+	s.setBodyDeadline(w)
 	r.Body = http.MaxBytesReader(w, r.Body, int64(limit)+1024)
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -56,6 +58,9 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Defensive: net/http already clears the deadline when the body hits EOF;
+	// this guards future changes so the (long) SSE reply is never cut.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
 	if len(req.Text) > limit {
 		http.Error(w, "message too long", http.StatusRequestEntityTooLarge)
 		return

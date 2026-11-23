@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/config"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/ratelimit"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/session"
 )
 
@@ -57,6 +59,9 @@ type server struct {
 	version string
 	log     *slog.Logger
 	pages   map[string]*template.Template
+	userLim *ratelimit.Limiter
+	ipLim   *ratelimit.Limiter
+	trusted []netip.Prefix
 
 	mu     sync.Mutex
 	active map[string]bool // session IDs with a running chat reply
@@ -71,6 +76,15 @@ func New(cfg *config.Config, a Authn, c Clusters, ch Chat, store *session.Store,
 func build(cfg *config.Config, a Authn, c Clusters, ch Chat, store *session.Store, version string, log *slog.Logger) (*server, http.Handler, error) {
 	s := &server{cfg: cfg, authn: a, cl: c, ch: ch, now: time.Now, store: store, version: version, log: log,
 		pages: map[string]*template.Template{}, active: map[string]bool{}}
+	for _, p := range cfg.Login.TrustedProxies {
+		pf, err := netip.ParsePrefix(p)
+		if err != nil {
+			return nil, nil, err
+		}
+		s.trusted = append(s.trusted, pf)
+	}
+	s.userLim = ratelimit.New(cfg.Login.MaxAttemptsPerUser, cfg.Login.AttemptWindow, s.now)
+	s.ipLim = ratelimit.New(cfg.Login.MaxAttemptsPerIP, cfg.Login.AttemptWindow, s.now)
 	funcs := template.FuncMap{"principal": principalOf, "esc": url.PathEscape, "deref": func(b *bool) bool { return *b }}
 	for _, p := range []string{"login", "home", "diagnostics", "cluster", "loggedout"} {
 		t, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/"+p+".html")
@@ -96,16 +110,45 @@ func build(cfg *config.Config, a Authn, c Clusters, ch Chat, store *session.Stor
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(version + "\n")) })
-	return s, securityHeaders(mux), nil
+	// Defence in depth on top of the per-form CSRF tokens: reject unsafe
+	// cross-origin browser requests. Requests with no Sec-Fetch-Site or Origin
+	// header (curl, tests) pass; safe methods always pass.
+	cop := http.NewCrossOriginProtection()
+	cop.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.log.Warn("cross-origin request blocked", "event", "cross_origin_blocked",
+			"method", r.Method, "path", r.URL.Path, "ip", clientIP(r, s.trusted).String())
+		http.Error(w, "cross-origin request blocked", http.StatusForbidden)
+	}))
+	return s, securityHeaders(cop.Handler(mux), cfg.SecureCookies()), nil
 }
 
-func securityHeaders(next http.Handler) http.Handler {
+// bodyReadTimeout bounds how long a client may take to send a request body.
+// It is a var so tests can shorten it.
+var bodyReadTimeout = 10 * time.Second
+
+// logoutTimeout bounds token revocation on logout.
+const logoutTimeout = 30 * time.Second
+
+// setBodyDeadline sets a read deadline of bodyReadTimeout from now on the
+// connection, so a slow client cannot hold the handler while sending a body.
+// Socket deadlines use the wall clock, not s.now. Writers that don't support
+// deadlines (httptest.ResponseRecorder) are ignored.
+func (s *server) setBodyDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadTimeout))
+}
+
+func securityHeaders(next http.Handler, secure bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		if secure {
+			h.Set("Strict-Transport-Security", "max-age=31536000")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -156,7 +199,7 @@ func (s *server) current(r *http.Request) (*session.Session, bool) {
 func (s *server) setCookie(w http.ResponseWriter, value string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{
 		Name: cookieName, Value: value, Path: "/", MaxAge: maxAge,
-		HttpOnly: true, Secure: s.cfg.SecureCookies(), SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: s.cfg.SecureCookies(), SameSite: http.SameSiteStrictMode,
 	})
 }
 
@@ -166,6 +209,7 @@ var loginErrors = map[string]string{
 	"failed":      "Login failed",
 	"unavailable": "Rancher is unavailable, try again later",
 	"badresponse": "Unexpected response from Rancher; see the portal logs",
+	"limited":     "Too many login attempts; try again later",
 }
 
 func (s *server) index(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +237,28 @@ func failureCode(res auth.Result) string {
 	return "failed"
 }
 
+// anyTimeout reports whether any site's login timed out.
+func anyTimeout(res auth.Result) bool {
+	for _, st := range res.Sites {
+		if st.Timeout {
+			return true
+		}
+	}
+	return false
+}
+
+// ipLimitKey is the per-IP limiter key: the address for IPv4, the /64 for
+// IPv6 (one host usually holds a whole /64, so per-address buckets are free
+// to rotate through).
+func ipLimitKey(ip netip.Addr) string {
+	if ip.Is6() {
+		return netip.PrefixFrom(ip, 64).Masked().String()
+	}
+	return ip.String()
+}
+
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
+	s.setBodyDeadline(w)
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormSize)
 	if err := r.ParseForm(); err != nil {
 		s.render(w, http.StatusBadRequest, "login", pageData{Error: "Request too large"})
@@ -205,12 +270,45 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusBadRequest, "login", pageData{Error: "Enter username and password", Username: username})
 		return
 	}
-	res := s.authn.Login(r.Context(), username, password)
-	if !res.OK {
+	// Count the attempt before calling Rancher so parallel requests cannot
+	// exceed the limit. The IP is checked first so a blocked IP cannot burn
+	// a victim's per-user attempts.
+	ip := clientIP(r, s.trusted)
+	ipKey := ipLimitKey(ip)
+	key := session.UserKey(username)
+	if !s.ipLim.Reserve(ipKey) {
+		s.log.Warn("login rate limited", "event", "login_rate_limited", "username", key, "ip", ip.String(), "scope", "ip")
+		http.Redirect(w, r, "/?e=limited", http.StatusSeeOther)
+		return
+	}
+	if !s.userLim.Reserve(key) {
+		s.log.Warn("login rate limited", "event", "login_rate_limited", "username", key, "ip", ip.String(), "scope", "user")
+		http.Redirect(w, r, "/?e=limited", http.StatusSeeOther)
+		return
+	}
+	// A client that hangs up must not cancel the Rancher call: AD may already
+	// have counted the bind, so the attempt has to stay counted. The per-site
+	// login.timeout still bounds the call.
+	res := s.authn.Login(context.WithoutCancel(r.Context()), username, password)
+	if res.OK {
+		// A success proves the caller is not guessing.
+		s.userLim.Reset(key)
+		s.ipLim.Release(ipKey)
+	} else {
+		code := failureCode(res)
+		// Give the attempt back only when Rancher was plainly unreachable: not
+		// after a timeout (the bind may have reached AD) and not when the
+		// client went away mid-call.
+		if code == "unavailable" && !anyTimeout(res) && r.Context().Err() == nil {
+			s.userLim.Release(key)
+		}
 		// POST-redirect-GET: a browser refresh must not re-send the password
 		// (each resubmit would be another AD attempt).
-		http.Redirect(w, r, "/?e="+failureCode(res), http.StatusSeeOther)
+		http.Redirect(w, r, "/?e="+code, http.StatusSeeOther)
 		return
+	}
+	if old, ok := s.current(r); ok {
+		s.store.End(old.ID, "relogin")
 	}
 	sess := s.store.Create(session.Session{Username: username, Principal: res.PrincipalID, Sites: res.Sites, Warnings: res.Warnings})
 	s.setCookie(w, sess.ID, 0)
@@ -257,6 +355,7 @@ func (s *server) refresh(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+	s.setBodyDeadline(w)
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormSize)
 	_ = r.ParseForm()
 	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(sess.CSRF)) != 1 {
@@ -289,6 +388,7 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+	s.setBodyDeadline(w)
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormSize)
 	_ = r.ParseForm()
 	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("csrf")), []byte(sess.CSRF)) != 1 {
@@ -296,7 +396,11 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.Delete(sess.ID)
-	results := s.authn.Logout(r.Context(), sess.Sites)
+	// The session is already gone, so a closed tab must not cancel the
+	// revocation and orphan the tokens.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), logoutTimeout)
+	defer cancel()
+	results := s.authn.Logout(ctx, sess.Sites)
 	s.setCookie(w, "", -1)
 	s.render(w, http.StatusOK, "loggedout", pageData{Session: sess, Logout: results})
 }

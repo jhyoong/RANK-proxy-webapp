@@ -1,8 +1,10 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -20,6 +22,7 @@ import (
 	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/config"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/rancher"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/ratelimit"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/session"
 )
 
@@ -30,17 +33,44 @@ const wantCSP = "default-src 'none'; script-src 'self'; connect-src 'self'; styl
 type stubAuthn struct {
 	result      auth.Result
 	loginCalls  int
+	mu          sync.Mutex
+	delay       time.Duration
 	logoutSites []auth.SiteResult
 	logoutCalls int
+	logoutAll   [][]auth.SiteResult
+	// onLogin, if set, runs inside Login with its context.
+	onLogin func(ctx context.Context)
+	// State of the last Logout call's context, taken when it was called.
+	logoutCtxErr   error
+	logoutDeadline time.Time
+	logoutHasDL    bool
 }
 
-func (s *stubAuthn) Login(_ context.Context, _, _ string) auth.Result {
+func (s *stubAuthn) Login(ctx context.Context, _, _ string) auth.Result {
+	s.mu.Lock()
 	s.loginCalls++
-	return s.result
+	res, d, hook := s.result, s.delay, s.onLogin
+	s.mu.Unlock()
+	time.Sleep(d)
+	if hook != nil {
+		hook(ctx)
+	}
+	return res
 }
-func (s *stubAuthn) Logout(_ context.Context, sites []auth.SiteResult) []auth.LogoutResult {
+
+func (s *stubAuthn) calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loginCalls
+}
+func (s *stubAuthn) Logout(ctx context.Context, sites []auth.SiteResult) []auth.LogoutResult {
+	s.mu.Lock()
 	s.logoutCalls++
+	s.logoutCtxErr = ctx.Err()
+	s.logoutDeadline, s.logoutHasDL = ctx.Deadline()
 	s.logoutSites = sites
+	s.logoutAll = append(s.logoutAll, sites)
+	s.mu.Unlock()
 	var out []auth.LogoutResult
 	for _, st := range sites {
 		out = append(out, auth.LogoutResult{Site: st.Site, LoggedOut: true, Revoked: true})
@@ -107,13 +137,14 @@ type harness struct {
 func newHarness(t *testing.T, secure bool) harness {
 	t.Helper()
 	cfg := &config.Config{CookieSecure: &secure, Sites: []config.Site{{Name: "site-1"}, {Name: "site-2"}, {Name: "site-3"}},
+		Login:    config.LoginConfig{MaxAttemptsPerUser: 3, MaxAttemptsPerIP: 20, AttemptWindow: 15 * time.Minute},
 		Clusters: config.ClustersConfig{CacheTTL: 2 * time.Minute}, Chat: config.ChatConfig{MaxMessageBytes: 8192}}
 	stub := &stubAuthn{result: okResult()}
 	clock := time.Now()
 	hs := &harness{}
 	cl := &stubClusters{listing: defaultListing(), now: func() time.Time { return *hs.clock }}
-	store := session.NewStore(30*time.Minute, 8*time.Hour, time.Now)
-	ch := &stubChat{started: make(chan struct{}, 8), ctxDone: make(chan struct{}, 8)}
+	store := session.NewStore(30*time.Minute, 8*time.Hour, 0, time.Now)
+	ch := &stubChat{started: make(chan struct{}, 8), ctxDone: make(chan struct{}, 8), slowErr: make(chan error, 1)}
 	srv, h, err := build(cfg, stub, cl, ch, store, "v-test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -159,7 +190,7 @@ func TestLogin_SuccessSetsCookie(t *testing.T) {
 		t.Fatalf("status %d location %q", rr.Code, rr.Header().Get("Location"))
 	}
 	sc := rr.Header().Get("Set-Cookie")
-	for _, want := range []string{"portal_session=", "HttpOnly", "Secure", "SameSite=Lax", "Path=/"} {
+	for _, want := range []string{"portal_session=", "HttpOnly", "Secure", "SameSite=Strict", "Path=/"} {
 		if !strings.Contains(sc, want) {
 			t.Fatalf("Set-Cookie %q missing %q", sc, want)
 		}
@@ -372,6 +403,40 @@ func TestSecurityHeaders(t *testing.T) {
 			h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Referrer-Policy") != "no-referrer" {
 			t.Fatalf("%s: headers %v", p, h)
 		}
+		if h.Get("X-Frame-Options") != "DENY" || h.Get("Cross-Origin-Opener-Policy") != "same-origin" ||
+			h.Get("Strict-Transport-Security") != "max-age=31536000" {
+			t.Fatalf("%s: headers %v", p, h)
+		}
+	}
+}
+
+func TestSecurityHeaders_NoHSTSWhenInsecure(t *testing.T) {
+	hs := newHarness(t, false)
+	rr := hs.do("GET", "/healthz", nil, nil)
+	if v := rr.Header().Get("Strict-Transport-Security"); v != "" {
+		t.Fatalf("HSTS %q", v)
+	}
+	if rr.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatal("X-Frame-Options missing")
+	}
+}
+
+func TestChat_LongReplyNotCutByReadDeadline(t *testing.T) {
+	old := bodyReadTimeout
+	bodyReadTimeout = 100 * time.Millisecond
+	defer func() { bodyReadTimeout = old }()
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	ts := httptest.NewServer(hs.h)
+	defer ts.Close()
+	resp := liveChat(t, context.Background(), ts.URL, hs, c, "slow")
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), "event: done\n") {
+		t.Fatalf("reply cut: %q", b)
+	}
+	if err := <-hs.ch.slowErr; err != nil {
+		t.Fatalf("reply context cancelled: %v", err)
 	}
 }
 
@@ -591,6 +656,7 @@ type stubChat struct {
 	script  []chat.Out
 	started chan struct{}
 	ctxDone chan struct{}
+	slowErr chan error
 }
 
 func (s *stubChat) Send(ctx context.Context, _ []auth.SiteResult, row clusters.Row, principal, text, contextID string, emit func(chat.Out)) {
@@ -601,6 +667,13 @@ func (s *stubChat) Send(ctx context.Context, _ []auth.SiteResult, row clusters.R
 	s.started <- struct{}{}
 	for _, o := range script {
 		emit(o)
+	}
+	if text == "slow" {
+		select {
+		case <-time.After(400 * time.Millisecond):
+		case <-ctx.Done():
+		}
+		s.slowErr <- ctx.Err()
 	}
 	if text == "block" {
 		<-ctx.Done()
@@ -895,5 +968,428 @@ func TestChatJS_NoInnerHTML(t *testing.T) {
 		if strings.Contains(string(src), bad) {
 			t.Fatalf("chat.js contains %q", bad)
 		}
+	}
+}
+
+func failResult() auth.Result {
+	return auth.Result{Sites: []auth.SiteResult{{Site: "site-1", Status: auth.StatusRejected}}}
+}
+
+func loginForm(user string) url.Values {
+	return url.Values{"username": {user}, "password": {"pw-secret-value"}}
+}
+
+func TestLogin_UserLimit(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.stub.result = failResult()
+	for i := 0; i < 3; i++ {
+		rr := hs.do("POST", "/login", loginForm("jdoe"), nil)
+		if rr.Header().Get("Location") != "/?e=failed" {
+			t.Fatalf("attempt %d: %q", i, rr.Header().Get("Location"))
+		}
+	}
+	rr := hs.do("POST", "/login", loginForm("jdoe"), nil)
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/?e=limited" || hs.stub.calls() != 3 {
+		t.Fatalf("4th: %d %q calls %d", rr.Code, rr.Header().Get("Location"), hs.stub.calls())
+	}
+	if !strings.Contains(hs.do("GET", "/?e=limited", nil, nil).Body.String(), "Too many login attempts; try again later") {
+		t.Fatal("message missing")
+	}
+}
+
+func TestLogin_UsernameCaseFolded(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.stub.result = failResult()
+	for _, u := range []string{"JDoe", "jdoe", " jdoe "} {
+		hs.do("POST", "/login", loginForm(u), nil)
+	}
+	rr := hs.do("POST", "/login", loginForm("JDOE"), nil)
+	if rr.Header().Get("Location") != "/?e=limited" || hs.stub.calls() != 3 {
+		t.Fatalf("%q calls %d", rr.Header().Get("Location"), hs.stub.calls())
+	}
+}
+
+func TestLogin_IPLimit(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.stub.result = failResult()
+	for i := 0; i < 20; i++ {
+		hs.do("POST", "/login", loginForm("user"+strings.Repeat("x", i)), nil)
+	}
+	rr := hs.do("POST", "/login", loginForm("another"), nil)
+	if rr.Header().Get("Location") != "/?e=limited" || hs.stub.calls() != 20 {
+		t.Fatalf("%q calls %d", rr.Header().Get("Location"), hs.stub.calls())
+	}
+}
+
+func TestLogin_SuccessResetsUser(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.stub.result = failResult()
+	hs.do("POST", "/login", loginForm("jdoe"), nil)
+	hs.do("POST", "/login", loginForm("jdoe"), nil)
+	hs.stub.result = okResult()
+	if rr := hs.do("POST", "/login", loginForm("jdoe"), nil); rr.Header().Get("Location") != "/home" {
+		t.Fatalf("success: %q", rr.Header().Get("Location"))
+	}
+	hs.stub.result = failResult()
+	for i := 0; i < 3; i++ {
+		if rr := hs.do("POST", "/login", loginForm("jdoe"), nil); rr.Header().Get("Location") != "/?e=failed" {
+			t.Fatalf("after reset %d: %q", i, rr.Header().Get("Location"))
+		}
+	}
+}
+
+func TestLogin_UnavailableRefundsUserAttempt(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.stub.result = auth.Result{Sites: []auth.SiteResult{{Site: "site-1", Status: auth.StatusUnavailable}, {Site: "site-2", Status: auth.StatusUnavailable}}}
+	for i := 0; i < 5; i++ {
+		if rr := hs.do("POST", "/login", loginForm("jdoe"), nil); rr.Header().Get("Location") != "/?e=unavailable" {
+			t.Fatalf("%d: %q", i, rr.Header().Get("Location"))
+		}
+	}
+	if hs.stub.calls() != 5 {
+		t.Fatalf("calls %d", hs.stub.calls())
+	}
+}
+
+func TestLogin_ParallelAttemptsCapped(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.stub.result = failResult()
+	hs.stub.delay = 50 * time.Millisecond
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			hs.do("POST", "/login", loginForm("jdoe"), nil)
+		}()
+	}
+	wg.Wait()
+	if n := hs.stub.calls(); n > 3 {
+		t.Fatalf("calls %d", n)
+	}
+}
+
+func TestLogin_EmptyFieldsNotCounted(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.stub.result = failResult()
+	for i := 0; i < 10; i++ {
+		hs.do("POST", "/login", url.Values{"username": {"jdoe"}}, nil)
+	}
+	for i := 0; i < 3; i++ {
+		if rr := hs.do("POST", "/login", loginForm("jdoe"), nil); rr.Header().Get("Location") != "/?e=failed" {
+			t.Fatalf("%d: %q", i, rr.Header().Get("Location"))
+		}
+	}
+}
+
+func TestLogin_RateLimitLogged(t *testing.T) {
+	hs := newHarness(t, true)
+	var buf syncBuf
+	hs.srv.log = slog.New(slog.NewJSONHandler(&buf, nil))
+	hs.stub.result = failResult()
+	for i := 0; i < 4; i++ {
+		hs.do("POST", "/login", loginForm("jdoe"), nil)
+	}
+	out := buf.String()
+	if strings.Count(out, `"event":"login_rate_limited"`) != 1 || !strings.Contains(out, `"scope":"user"`) ||
+		!strings.Contains(out, `"username":"jdoe"`) || !strings.Contains(out, `"ip":"192.0.2.1"`) {
+		t.Fatalf("log: %s", out)
+	}
+	if strings.Contains(out, "pw-secret-value") {
+		t.Fatal("password logged")
+	}
+}
+
+type syncBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func TestRevoke_CallsLogoutPerSession(t *testing.T) {
+	stub := &stubAuthn{}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, nil))
+	mk := func(name string) *session.Session {
+		r := okResult()
+		r.Sites[0].Token.Bearer = "bearer-" + name + ":SECRETVALUE"
+		return &session.Session{Username: name, Principal: principal, Sites: r.Sites}
+	}
+	var ended []session.Ended
+	for i := range 20 {
+		ended = append(ended, session.Ended{Session: mk("user" + strings.Repeat("x", i)), Reason: "evicted"})
+	}
+	Revoke(context.Background(), stub, ended, log)
+	if stub.logoutCalls != 20 || len(stub.logoutAll) != 20 {
+		t.Fatalf("logout calls = %d", stub.logoutCalls)
+	}
+	for _, sites := range stub.logoutAll {
+		if len(sites) != 3 {
+			t.Fatalf("sites = %d", len(sites))
+		}
+	}
+	out := buf.String()
+	if strings.Count(out, `"event":"session_ended"`) != 20 || !strings.Contains(out, `"reason":"evicted"`) {
+		t.Fatalf("log: %s", out)
+	}
+	if strings.Contains(out, "SECRETVALUE") || strings.Contains(out, "bearer-") {
+		t.Fatalf("bearer leaked: %s", out)
+	}
+}
+
+func TestLogin_ReloginEndsOldSession(t *testing.T) {
+	hs := newHarness(t, true)
+	first := hs.login(t)
+	rr := hs.do("POST", "/login", url.Values{"username": {"jdoe"}, "password": {"pw"}}, first)
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/home" {
+		t.Fatalf("status %d", rr.Code)
+	}
+	if rr := hs.do("GET", "/home", nil, first); rr.Code == 200 {
+		t.Fatal("old cookie still opens /home")
+	}
+	got := hs.store.Sweep()
+	if len(got) != 1 || got[0].Session.ID != first.Value || got[0].Reason != "relogin" {
+		t.Fatalf("sweep %+v", got)
+	}
+}
+
+func (hs harness) doHdr(method, path string, form url.Values, cookie *http.Cookie, hdr map[string]string) *httptest.ResponseRecorder {
+	var body io.Reader
+	if form != nil {
+		body = strings.NewReader(form.Encode())
+	}
+	req := httptest.NewRequest(method, path, body)
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	for k, v := range hdr {
+		if k == "Host" {
+			req.Host = v
+			continue
+		}
+		req.Header.Set(k, v)
+	}
+	rr := httptest.NewRecorder()
+	hs.h.ServeHTTP(rr, req)
+	return rr
+}
+
+var coForm = url.Values{"username": {"jdoe"}, "password": {"pw"}}
+
+func TestCookie_SameSiteStrict(t *testing.T) {
+	hs := newHarness(t, false)
+	c := hs.login(t)
+	if c.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("SameSite = %v", c.SameSite)
+	}
+}
+
+func TestCrossOrigin_LoginBlocked(t *testing.T) {
+	hs := newHarness(t, false)
+	rr := hs.doHdr("POST", "/login", coForm, nil, map[string]string{"Sec-Fetch-Site": "cross-site"})
+	if rr.Code != http.StatusForbidden || hs.stub.loginCalls != 0 {
+		t.Fatalf("status %d calls %d", rr.Code, hs.stub.loginCalls)
+	}
+	if !strings.Contains(rr.Body.String(), "cross-origin request blocked") {
+		t.Fatalf("body %q", rr.Body.String())
+	}
+}
+
+func TestCrossOrigin_OriginMismatchBlocked(t *testing.T) {
+	hs := newHarness(t, false)
+	rr := hs.doHdr("POST", "/logout", nil, nil, map[string]string{"Origin": "https://evil.example", "Host": "portal.example"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status %d", rr.Code)
+	}
+}
+
+func TestCrossOrigin_SameOriginAllowed(t *testing.T) {
+	hs := newHarness(t, false)
+	rr := hs.doHdr("POST", "/login", coForm, nil, map[string]string{"Sec-Fetch-Site": "same-origin"})
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/home" {
+		t.Fatalf("status %d location %q", rr.Code, rr.Header().Get("Location"))
+	}
+}
+
+func TestCrossOrigin_NoHeadersAllowed(t *testing.T) {
+	hs := newHarness(t, false)
+	rr := hs.do("POST", "/login", coForm, nil)
+	if rr.Code != http.StatusSeeOther || rr.Header().Get("Location") != "/home" {
+		t.Fatalf("status %d location %q", rr.Code, rr.Header().Get("Location"))
+	}
+}
+
+func TestCrossOrigin_GetUnaffected(t *testing.T) {
+	hs := newHarness(t, false)
+	c := hs.login(t)
+	rr := hs.doHdr("GET", "/home", nil, c, map[string]string{"Sec-Fetch-Site": "cross-site"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d", rr.Code)
+	}
+}
+
+func TestCrossOrigin_Logged(t *testing.T) {
+	hs := newHarness(t, false)
+	var buf syncBuf
+	hs.srv.log = slog.New(slog.NewJSONHandler(&buf, nil))
+	hs.doHdr("POST", "/login", coForm, nil, map[string]string{"Sec-Fetch-Site": "cross-site"})
+	out := buf.String()
+	if strings.Count(out, `"event":"cross_origin_blocked"`) != 1 || !strings.Contains(out, `"method":"POST"`) ||
+		!strings.Contains(out, `"path":"/login"`) || !strings.Contains(out, `"ip":"192.0.2.1"`) || strings.Contains(out, `"pw"`) {
+		t.Fatalf("log: %s", out)
+	}
+}
+
+func allUnavailable(timeout bool) auth.Result {
+	return auth.Result{Sites: []auth.SiteResult{
+		{Site: "site-1", Status: auth.StatusUnavailable, Timeout: timeout},
+		{Site: "site-2", Status: auth.StatusUnavailable}}}
+}
+
+// doCtx posts the login form with the given request context and RemoteAddr
+// ("" keeps httptest's default).
+func (hs harness) doCtx(ctx context.Context, remote string, form url.Values) *httptest.ResponseRecorder {
+	req := httptest.NewRequestWithContext(ctx, "POST", "/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if remote != "" {
+		req.RemoteAddr = remote
+	}
+	rr := httptest.NewRecorder()
+	hs.h.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestLogin_ClientAbortNoRefund(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.stub.result = allUnavailable(false)
+	var cancel context.CancelFunc
+	var loginCtxErrs []error
+	hs.stub.onLogin = func(ctx context.Context) {
+		cancel() // the client goes away while Rancher is being asked
+		loginCtxErrs = append(loginCtxErrs, ctx.Err())
+	}
+	for i := 0; i < 3; i++ {
+		ctx, c := context.WithCancel(context.Background())
+		cancel = c
+		hs.doCtx(ctx, "", loginForm("jdoe"))
+		c()
+	}
+	for i, err := range loginCtxErrs {
+		if err != nil {
+			t.Fatalf("attempt %d: Login context cancelled with the request: %v", i, err)
+		}
+	}
+	hs.stub.onLogin = nil
+	rr := hs.do("POST", "/login", loginForm("jdoe"), nil)
+	if rr.Header().Get("Location") != "/?e=limited" || hs.stub.calls() != 3 {
+		t.Fatalf("4th: %q calls %d", rr.Header().Get("Location"), hs.stub.calls())
+	}
+}
+
+func TestLogin_TimeoutNoRefund(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.stub.result = allUnavailable(true)
+	for i := 0; i < 3; i++ {
+		if rr := hs.do("POST", "/login", loginForm("jdoe"), nil); rr.Header().Get("Location") != "/?e=unavailable" {
+			t.Fatalf("%d: %q", i, rr.Header().Get("Location"))
+		}
+	}
+	rr := hs.do("POST", "/login", loginForm("jdoe"), nil)
+	if rr.Header().Get("Location") != "/?e=limited" || hs.stub.calls() != 3 {
+		t.Fatalf("4th: %q calls %d", rr.Header().Get("Location"), hs.stub.calls())
+	}
+}
+
+func TestLogin_DomainFormsShareBucket(t *testing.T) {
+	hs := newHarness(t, true)
+	var buf syncBuf
+	hs.srv.log = slog.New(slog.NewJSONHandler(&buf, nil))
+	hs.stub.result = failResult()
+	for _, u := range []string{"jdoe", `CORP\jdoe`, "jdoe@corp.example"} {
+		hs.do("POST", "/login", loginForm(u), nil)
+	}
+	for _, u := range []string{" JDoe ", `CORP\JDoe`, "JDOE@corp.example"} {
+		rr := hs.do("POST", "/login", loginForm(u), nil)
+		if rr.Header().Get("Location") != "/?e=limited" {
+			t.Fatalf("%q: %q", u, rr.Header().Get("Location"))
+		}
+	}
+	if hs.stub.calls() != 3 {
+		t.Fatalf("calls %d", hs.stub.calls())
+	}
+	if strings.Count(buf.String(), `"username":"jdoe"`) != 3 {
+		t.Fatalf("log should use the limiter key: %s", buf.String())
+	}
+}
+
+func TestLogin_SuccessReleasesIP(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.srv.ipLim = ratelimit.New(3, 15*time.Minute, hs.srv.now)
+	for i := 0; i < 4; i++ {
+		rr := hs.do("POST", "/login", loginForm(fmt.Sprintf("user%d", i)), nil)
+		if rr.Header().Get("Location") != "/home" {
+			t.Fatalf("login %d: %q", i, rr.Header().Get("Location"))
+		}
+	}
+	// Failures still count against the IP.
+	hs.stub.result = failResult()
+	for i := 0; i < 3; i++ {
+		hs.do("POST", "/login", loginForm(fmt.Sprintf("bad%d", i)), nil)
+	}
+	if rr := hs.do("POST", "/login", loginForm("bad9"), nil); rr.Header().Get("Location") != "/?e=limited" {
+		t.Fatalf("after failures: %q", rr.Header().Get("Location"))
+	}
+}
+
+func TestLogin_IPv6SharesSlash64(t *testing.T) {
+	hs := newHarness(t, true)
+	hs.srv.ipLim = ratelimit.New(2, 15*time.Minute, hs.srv.now)
+	hs.stub.result = failResult()
+	bg := context.Background()
+	hs.doCtx(bg, "[2001:db8::1]:1234", loginForm("a"))
+	hs.doCtx(bg, "[2001:db8::2]:1234", loginForm("b"))
+	if rr := hs.doCtx(bg, "[2001:db8::ffff:1]:1234", loginForm("c")); rr.Header().Get("Location") != "/?e=limited" {
+		t.Fatalf("same /64: %q", rr.Header().Get("Location"))
+	}
+	if rr := hs.doCtx(bg, "[2001:db8:0:1::1]:1234", loginForm("d")); rr.Header().Get("Location") != "/?e=failed" {
+		t.Fatalf("other /64: %q", rr.Header().Get("Location"))
+	}
+	if rr := hs.doCtx(bg, "198.51.100.7:1234", loginForm("e")); rr.Header().Get("Location") != "/?e=failed" {
+		t.Fatalf("ipv4: %q", rr.Header().Get("Location"))
+	}
+}
+
+func TestLogout_RevokeSurvivesClientDisconnect(t *testing.T) {
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	form := url.Values{"csrf": {csrfFrom(t, hs, c)}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequestWithContext(ctx, "POST", "/logout", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(c)
+	hs.h.ServeHTTP(httptest.NewRecorder(), req)
+	if hs.stub.logoutCalls != 1 {
+		t.Fatalf("logout calls %d", hs.stub.logoutCalls)
+	}
+	if err := hs.stub.logoutCtxErr; err != nil {
+		t.Fatalf("logout context cancelled with the request: %v", err)
+	}
+	if dl := hs.stub.logoutDeadline; !hs.stub.logoutHasDL || time.Until(dl) > 30*time.Second {
+		t.Fatalf("logout context deadline %v %v", dl, hs.stub.logoutHasDL)
 	}
 }

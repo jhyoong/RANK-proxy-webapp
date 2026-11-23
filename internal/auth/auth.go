@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +45,9 @@ type SiteResult struct {
 	User     *rancher.User // nil if Me failed or not ok
 	MeError  string
 	Latency  time.Duration
+	// Timeout is true when the login timed out (client timeout, deadline
+	// exceeded or HTTP 504). Rancher may have reached AD before giving up.
+	Timeout bool
 }
 
 // Result is the outcome of a portal login.
@@ -100,6 +105,20 @@ func classify(err error) (Status, int, string) {
 	return StatusUnavailable, 0, ShortErr(err)
 }
 
+// isTimeout reports whether a login error is a timeout: the site may have
+// passed the bind to AD before the portal stopped waiting.
+func isTimeout(err error) bool {
+	var se *rancher.StatusError
+	if errors.As(err, &se) {
+		return se.Code == 504
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 // ShortErr trims a transport error to something safe and readable.
 func ShortErr(err error) string {
 	msg := err.Error()
@@ -119,6 +138,7 @@ func (a *Authenticator) loginSite(ctx context.Context, c *rancher.Client, userna
 	r := SiteResult{Site: c.Name, Latency: time.Since(start)}
 	if err != nil {
 		r.Status, r.HTTPCode, r.Error = classify(err)
+		r.Timeout = isTimeout(err)
 		var se *rancher.StatusError
 		if errors.As(err, &se) && se.Code != 401 {
 			// A 401 is a plain wrong password; anything else needs the body
@@ -305,6 +325,7 @@ type logSite struct {
 	Status    Status `json:"status"`
 	HTTPCode  int    `json:"http_code"`
 	Error     string `json:"error,omitempty"`
+	Timeout   bool   `json:"timeout,omitempty"`
 	TokenID   string `json:"token_id,omitempty"`
 	ExpiresAt string `json:"expires_at,omitempty"`
 	UserID    string `json:"user_id,omitempty"`
@@ -316,7 +337,7 @@ type logSite struct {
 func logSites(sites []SiteResult) []logSite {
 	out := make([]logSite, len(sites))
 	for i, s := range sites {
-		out[i] = logSite{Site: s.Site, Status: s.Status, HTTPCode: s.HTTPCode, Error: s.Error,
+		out[i] = logSite{Site: s.Site, Status: s.Status, HTTPCode: s.HTTPCode, Error: s.Error, Timeout: s.Timeout,
 			TokenID: s.Token.ID, ExpiresAt: s.Token.ExpiresAt, UserID: s.Token.UserID,
 			MeError: s.MeError, LatencyMS: s.Latency.Milliseconds()}
 		if s.User != nil {

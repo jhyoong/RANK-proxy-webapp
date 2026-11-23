@@ -25,8 +25,17 @@ data:
     session:
       idle_timeout: 30m
       absolute_timeout: 8h
+      max_per_user: 5
     login:
       timeout: 15s
+      # Keep max_attempts_per_user below the AD lockout threshold minus
+      # attempts made in the Rancher UI directly. attempt_window should be at
+      # least AD's lockout observation window.
+      max_attempts_per_user: 3
+      max_attempts_per_ip: 20
+      attempt_window: 15m
+      # Ingress controller's pod CIDR, so X-Forwarded-For is trusted only from it.
+      trusted_proxies: [<ingress-pod-cidr>]
     # Where kagent lives in each downstream cluster (URL path segments: no
     # "/", "?" or "#"). Defaults shown, except agent_name (required: the deployed kagent agent's name).
     kagent:
@@ -86,6 +95,10 @@ spec:
     metadata:
       labels: {app: portal}
     spec:
+      # Shutdown needs up to 25s: a 15s HTTP drain, then a 10s pass revoking
+      # every live session's Rancher tokens. 30s is the Kubernetes default; it
+      # is set explicitly so it is not lowered below what shutdown needs.
+      terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -130,3 +143,40 @@ spec:
   selector: {app: portal}
   ports:
     - {name: http, port: 80, targetPort: http}
+---
+# Default-deny for the portal pod, with only the flows it needs. Placeholders:
+# <ingress-controller-namespace> and each <rancher-site-N-cidr>.
+# Note: during a `kubectl port-forward` live test, port-forward goes through the
+# kubelet and is not subject to NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: portal
+  namespace: kagent-portal
+spec:
+  podSelector:
+    matchLabels: {app: portal}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: <ingress-controller-namespace>
+      ports:
+        - {protocol: TCP, port: 8080}
+  egress:
+    - to:
+        - ipBlock: {cidr: <rancher-site-1-cidr>}
+        - ipBlock: {cidr: <rancher-site-2-cidr>}
+        - ipBlock: {cidr: <rancher-site-3-cidr>}
+      ports:
+        - {protocol: TCP, port: 443}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}

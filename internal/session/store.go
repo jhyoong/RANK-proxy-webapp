@@ -3,9 +3,11 @@
 package session
 
 import (
+	"cmp"
 	"crypto/rand"
 	"encoding/base64"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,20 +25,73 @@ type Session struct {
 	// Clusters is the cached cluster list. The pointer is shared and the
 	// Listing is never mutated; SetClusters replaces it.
 	Clusters *clusters.Listing
+
+	seq uint64 // creation order, breaks Created ties when evicting
 }
 
 // Store holds sessions in memory.
 type Store struct {
-	mu       sync.Mutex
-	m        map[string]*Session
-	idle     time.Duration
-	absolute time.Duration
-	now      func() time.Time
+	mu         sync.Mutex
+	m          map[string]*Session
+	ended      []Ended
+	idle       time.Duration
+	absolute   time.Duration
+	maxPerUser int
+	seq        uint64
+	now        func() time.Time
 }
 
-// NewStore returns an empty store. now is injectable for tests.
-func NewStore(idle, absolute time.Duration, now func() time.Time) *Store {
-	return &Store{m: map[string]*Session{}, idle: idle, absolute: absolute, now: now}
+// Ended is a session that left the store and whose tokens still need
+// revoking. Reason is "expired", "evicted", "relogin" or "shutdown".
+type Ended struct {
+	Session *Session
+	Reason  string
+}
+
+// UserKey normalises a typed username to the account it names, so that the
+// forms Rancher's AD provider accepts for one account (jdoe, CORP\jdoe,
+// jdoe@corp.example) map to one key: lowercase, trim, drop everything up to
+// the last backslash and from the first "@". If that leaves nothing, the
+// lowercased trimmed input is returned.
+func UserKey(username string) string {
+	base := strings.ToLower(strings.TrimSpace(username))
+	k := base
+	if i := strings.LastIndexByte(k, '\\'); i >= 0 {
+		k = k[i+1:]
+	}
+	if i := strings.IndexByte(k, '@'); i >= 0 {
+		k = k[:i]
+	}
+	k = strings.TrimSpace(k)
+	if k == "" {
+		return base
+	}
+	return k
+}
+
+// capKey is the identity the per-user session cap counts against: the AD
+// principal when known (case-folded), else the normalised username.
+func capKey(sess *Session) string {
+	if sess.Principal != "" {
+		return strings.ToLower(sess.Principal)
+	}
+	return UserKey(sess.Username)
+}
+
+// endLocked moves the session to the ended queue. s.mu must be held.
+func (s *Store) endLocked(id, reason string) {
+	sess, ok := s.m[id]
+	if !ok {
+		return
+	}
+	delete(s.m, id)
+	s.ended = append(s.ended, Ended{Session: sess, Reason: reason})
+}
+
+// NewStore returns an empty store. maxPerUser caps live sessions per user
+// (see capKey); zero or less means no cap. now is injectable for tests.
+func NewStore(idle, absolute time.Duration, maxPerUser int, now func() time.Time) *Store {
+	return &Store{m: map[string]*Session{}, idle: idle, absolute: absolute, maxPerUser: maxPerUser, now: now}
 }
 
 func randomID() string {
@@ -65,13 +120,35 @@ func (s *Store) Create(sess Session) *Session {
 	sess.Created, sess.LastSeen = now, now
 	stored := clone(&sess)
 	s.mu.Lock()
+	s.seq++
+	stored.seq = s.seq
+	if s.maxPerUser > 0 {
+		key := capKey(&sess)
+		var live []*Session
+		for id, o := range s.m {
+			if capKey(o) != key {
+				continue
+			}
+			if s.expired(o, now) {
+				s.endLocked(id, "expired")
+				continue
+			}
+			live = append(live, o)
+		}
+		slices.SortFunc(live, func(a, b *Session) int { return cmp.Compare(a.seq, b.seq) })
+		for len(live) >= s.maxPerUser {
+			s.endLocked(live[0].ID, "evicted")
+			live = live[1:]
+		}
+	}
 	s.m[sess.ID] = stored
 	s.mu.Unlock()
 	return clone(stored)
 }
 
 // Get returns a copy of the session and refreshes its idle timer. Unknown or
-// expired sessions return false; expired ones are deleted.
+// expired sessions return false; expired ones are moved to the ended queue so
+// Sweep revokes their tokens.
 func (s *Store) Get(id string) (*Session, bool) {
 	now := s.now()
 	s.mu.Lock()
@@ -81,7 +158,7 @@ func (s *Store) Get(id string) (*Session, bool) {
 		return nil, false
 	}
 	if s.expired(sess, now) {
-		delete(s.m, id)
+		s.endLocked(id, "expired")
 		return nil, false
 	}
 	sess.LastSeen = now
@@ -95,7 +172,11 @@ func (s *Store) SetClusters(id string, l *clusters.Listing) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.m[id]
-	if !ok || s.expired(sess, now) {
+	if !ok {
+		return false
+	}
+	if s.expired(sess, now) {
+		s.endLocked(id, "expired")
 		return false
 	}
 	sess.Clusters = l
@@ -114,16 +195,40 @@ func (s *Store) Delete(id string) (*Session, bool) {
 	return sess, true
 }
 
-// Sweep deletes expired sessions.
-func (s *Store) Sweep() {
+// End moves the session to the ended queue with reason. Unknown IDs are ignored.
+func (s *Store) End(id, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.endLocked(id, reason)
+}
+
+// Sweep moves expired sessions to the ended queue, then empties the queue
+// and returns it. Each ended session is returned exactly once.
+func (s *Store) Sweep() []Ended {
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, sess := range s.m {
 		if s.expired(sess, now) {
-			delete(s.m, id)
+			s.endLocked(id, "expired")
 		}
 	}
+	out := s.ended
+	s.ended = nil
+	return out
+}
+
+// Drain removes every remaining session with reason "shutdown" and returns
+// them together with whatever was already in the ended queue.
+func (s *Store) Drain() []Ended {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id := range s.m {
+		s.endLocked(id, "shutdown")
+	}
+	out := s.ended
+	s.ended = nil
+	return out
 }
 
 // Len returns the number of stored sessions, including expired ones not yet swept.
