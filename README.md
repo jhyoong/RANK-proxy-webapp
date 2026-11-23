@@ -7,7 +7,7 @@ Chat portal for kagent across Rancher-managed clusters. See [docs/design.md](doc
 
 ```sh
 go test -race ./...
-node --test internal/web/jstest/   # Markdown renderer tests (needs Node)
+node --test internal/web/jstest/*.test.js   # Markdown renderer tests (needs Node)
 go build ./cmd/portal
 docker build -t portal:local --build-arg VERSION=dev .
 ```

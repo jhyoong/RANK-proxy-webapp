@@ -133,10 +133,20 @@ test('render builds nodes without innerHTML', () => {
   assert.equal(log.filter((e) => e.name === 'a').length, 1);
   const btn = log.find((e) => e.name === 'button');
   let copied;
-  global.navigator = { clipboard: { writeText: (s) => { copied = s; return Promise.resolve(); } } };
-  btn.listeners.click();
-  assert.equal(copied, 'code');
-  delete global.navigator;
+  // Node 21+ defines a read-only global navigator: swap it via a descriptor
+  // and restore the original afterwards.
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true, writable: true,
+    value: { clipboard: { writeText: (s) => { copied = s; return Promise.resolve(); } } },
+  });
+  try {
+    btn.listeners.click();
+    assert.equal(copied, 'code');
+  } finally {
+    if (saved) Object.defineProperty(globalThis, 'navigator', saved);
+    else delete globalThis.navigator;
+  }
 });
 
 test('no static script uses HTML-injecting APIs', () => {
