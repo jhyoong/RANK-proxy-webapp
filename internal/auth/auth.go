@@ -244,6 +244,7 @@ func (a *Authenticator) choosePrincipal(res *Result) {
 		res.Warnings = append(res.Warnings, "principal ID differs between sites; using "+res.Sites[firstOK(res.Sites)].Site+"'s value")
 	}
 	if res.PrincipalID == "" {
+		a.log.Warn("no activedirectory_user principal found on any site", "event", "no_principal", "sites", logSites(res.Sites))
 		res.Warnings = append(res.Warnings, "no activedirectory_user principal found on any site")
 	}
 }

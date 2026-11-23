@@ -1,10 +1,24 @@
+{{template "bare" .}}
 {{define "content"}}
-<form method="post" action="/login" class="login">
-  <h2>Log in</h2>
-  <p>Use your AD admin account.</p>
-  {{with .Error}}<p class="error">{{.}}</p>{{end}}
-  <label>Username <input name="username" autocomplete="username" value="{{.Username}}" required autofocus></label>
-  <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
-  <button type="submit">Log in</button>
-</form>
+<div class="split-login">
+  <section class="split-brand">
+    <h1 class="brand-name">kagent portal</h1>
+    <p class="tagline">AI assistant for Rancher-managed clusters</p>
+    {{with .Help}}<div class="login-help">{{range .}}<p>{{range .}}{{if .Href}}<a href="{{.Href}}">{{.Text}}</a>{{else}}{{.Text}}{{end}}{{end}}</p>{{end}}</div>{{end}}
+    <p class="split-footer">Need help? {{with .UI.SupportEmail}}<a href="mailto:{{.}}">{{.}}</a>{{else}}Contact your platform team.{{end}}</p>
+  </section>
+  <section class="split-form">
+    {{with .UI.Banner}}<div class="banner banner-{{$.UI.BannerLevel}}" role="status">{{.}}</div>{{end}}
+    <form method="post" action="/login" class="login-form">
+      <h2>Sign in</h2>
+      {{if .Expired}}<p class="notice" role="status">Your session has expired. Please sign in again.</p>{{end}}
+      {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" value="{{.Username}}" required autofocus>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit" class="btn btn-primary">Sign in</button>
+    </form>
+  </section>
+</div>
 {{end}}

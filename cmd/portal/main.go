@@ -22,6 +22,7 @@ import (
 	"github.com/jhyoong/RANK-proxy-webapp/internal/chat"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/config"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/history"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/rancher"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/session"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/web"
@@ -78,7 +79,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, ready chan<- stri
 	store := session.NewStore(cfg.Session.IdleTimeout, cfg.Session.AbsoluteTimeout, cfg.Session.MaxPerUser, time.Now)
 	authn := auth.New(clients, cfg.Session.AbsoluteTimeout, log)
 	handler, err := web.New(cfg, authn, clusters.New(apiClients, cfg.Kagent, cfg.Clusters.IncludeLocal, log),
-		chat.New(apiClients, cfg.Kagent, cfg.Chat, log), store, version, log)
+		chat.New(apiClients, cfg.Kagent, cfg.Chat, log), history.New(apiClients, cfg.Kagent, cfg.Chat.MaxDuration), store, version, log)
 	if err != nil {
 		return err
 	}

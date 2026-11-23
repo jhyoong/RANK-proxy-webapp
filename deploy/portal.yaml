@@ -57,6 +57,17 @@ data:
       max_message_bytes: 8192
       heartbeat: 15s
       log_events: true
+    ui:
+      # Announcement at the top of the login page. Plain text, one line, max 300 characters.
+      banner: ""
+      # Banner style: info (blue) or warning (amber). Default info.
+      banner_level: info
+      # Help box on the login page, max 2000 characters. Plain text; blank lines
+      # separate paragraphs; http(s) URLs and email addresses become links.
+      login_help: ""
+      # Support contact (bare address) shown on the login page, the unavailable
+      # screen, error messages and the user menu, as a mailto: link.
+      support_email: ""
     sites:
       - name: <site-1-name>
         url: https://<rancher-site-1-host>
@@ -165,6 +176,7 @@ spec:
       ports:
         - {protocol: TCP, port: 8080}
   egress:
+    # One ipBlock entry per configured site in sites:
     - to:
         - ipBlock: {cidr: <rancher-site-1-cidr>}
         - ipBlock: {cidr: <rancher-site-2-cidr>}

@@ -1,18 +1,22 @@
 // Package web serves the portal UI: login form, cluster list, per-cluster
-// kagent check with a chat panel, diagnostics and logout. The only script is
-// /static/chat.js, which streams one kagent reply at a time.
+// kagent check with a chat panel and conversation history, and logout. The
+// scripts are /static/markdown.js and /static/chat.js, which streams one
+// kagent reply at a time.
 package web
 
 import (
 	"context"
 	"crypto/subtle"
 	"embed"
+	"errors"
+	"fmt"
 	"html/template"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +25,7 @@ import (
 	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/config"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/history"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/ratelimit"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/session"
 )
@@ -49,11 +54,18 @@ type Clusters interface {
 	Check(ctx context.Context, sites []auth.SiteResult, row clusters.Row, principal string) clusters.CheckResult
 }
 
+// History is what the web layer needs from history.Service.
+type History interface {
+	List(ctx context.Context, sites []auth.SiteResult, row clusters.Row) ([]history.Conversation, error)
+	Transcript(ctx context.Context, sites []auth.SiteResult, row clusters.Row, id string) (history.Transcript, error)
+}
+
 type server struct {
 	cfg     *config.Config
 	authn   Authn
 	cl      Clusters
 	ch      Chat
+	hist    History
 	now     func() time.Time
 	store   *session.Store
 	version string
@@ -68,13 +80,13 @@ type server struct {
 }
 
 // New returns the portal's HTTP handler.
-func New(cfg *config.Config, a Authn, c Clusters, ch Chat, store *session.Store, version string, log *slog.Logger) (http.Handler, error) {
-	_, h, err := build(cfg, a, c, ch, store, version, log)
-	return h, err
+func New(cfg *config.Config, a Authn, c Clusters, ch Chat, h History, store *session.Store, version string, log *slog.Logger) (http.Handler, error) {
+	_, hd, err := build(cfg, a, c, ch, h, store, version, log)
+	return hd, err
 }
 
-func build(cfg *config.Config, a Authn, c Clusters, ch Chat, store *session.Store, version string, log *slog.Logger) (*server, http.Handler, error) {
-	s := &server{cfg: cfg, authn: a, cl: c, ch: ch, now: time.Now, store: store, version: version, log: log,
+func build(cfg *config.Config, a Authn, c Clusters, ch Chat, h History, store *session.Store, version string, log *slog.Logger) (*server, http.Handler, error) {
+	s := &server{cfg: cfg, authn: a, cl: c, ch: ch, hist: h, now: time.Now, store: store, version: version, log: log,
 		pages: map[string]*template.Template{}, active: map[string]bool{}}
 	for _, p := range cfg.Login.TrustedProxies {
 		pf, err := netip.ParsePrefix(p)
@@ -85,8 +97,8 @@ func build(cfg *config.Config, a Authn, c Clusters, ch Chat, store *session.Stor
 	}
 	s.userLim = ratelimit.New(cfg.Login.MaxAttemptsPerUser, cfg.Login.AttemptWindow, s.now)
 	s.ipLim = ratelimit.New(cfg.Login.MaxAttemptsPerIP, cfg.Login.AttemptWindow, s.now)
-	funcs := template.FuncMap{"principal": principalOf, "esc": url.PathEscape, "deref": func(b *bool) bool { return *b }}
-	for _, p := range []string{"login", "home", "diagnostics", "cluster", "loggedout"} {
+	funcs := template.FuncMap{"principal": principalOf, "esc": url.PathEscape, "rfc3339": rfc3339}
+	for _, p := range []string{"login", "home", "cluster", "loggedout"} {
 		t, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/"+p+".html")
 		if err != nil {
 			return nil, nil, err
@@ -102,10 +114,10 @@ func build(cfg *config.Config, a Authn, c Clusters, ch Chat, store *session.Stor
 	mux.HandleFunc("GET /{$}", s.index)
 	mux.HandleFunc("POST /login", s.login)
 	mux.HandleFunc("GET /home", s.home)
-	mux.HandleFunc("GET /diagnostics", s.diagnostics)
 	mux.HandleFunc("POST /clusters/refresh", s.refresh)
 	mux.HandleFunc("GET /clusters/{site}/{id}", s.cluster)
 	mux.HandleFunc("POST /clusters/{site}/{id}/chat", s.chat)
+	mux.HandleFunc("GET /clusters/{site}/{id}/conversations/{cid}", s.transcript)
 	mux.HandleFunc("POST /logout", s.logout)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
@@ -153,6 +165,14 @@ func securityHeaders(next http.Handler, secure bool) http.Handler {
 	})
 }
 
+// rfc3339 formats t for a data-updated attribute; the zero time is "".
+func rfc3339(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 func principalOf(ids []string) string {
 	for _, id := range ids {
 		if strings.HasPrefix(id, "activedirectory_user://") {
@@ -164,6 +184,9 @@ func principalOf(ids []string) string {
 
 type pageData struct {
 	Version  string
+	UI       config.UIConfig
+	Help     [][]Token // UI.LoginHelp split into paragraphs and links
+	Expired  bool      // the login page shows the session-expired notice
 	Error    string
 	Username string
 	Session  *session.Session
@@ -171,19 +194,35 @@ type pageData struct {
 	Listing  *clusters.Listing
 	Rows     []clusters.Row
 	Query    string
-	Row      clusters.Row
-	Check    clusters.CheckResult
-	// ContextID is a fresh A2A context for the chat panel; MaxMessage caps
-	// its textarea.
-	ContextID  string
-	MaxMessage int
+	// Cluster list: filter chips (logged-in sites in config order; empty
+	// unless several sites are configured), the active chip, banner texts,
+	// the shown row count and "N min ago" for the list's age.
+	Sites       []string
+	Site        string
+	SiteNotices []string
+	Count       int
+	UpdatedAgo  string
+	Row         clusters.Row
+	Check       clusters.CheckResult
+	// Cluster page: the sidebar's conversations, why they are missing
+	// ("unavailable" or "failed"), the open conversation (?c=), the chat's
+	// A2A context (Current, or a fresh UUID), the textarea cap and the
+	// reply cap in milliseconds.
+	Conversations []history.Conversation
+	HistoryError  string
+	Current       string
+	ContextID     string
+	MaxMessage    int
+	MaxDurationMS int64
 }
 
 func (s *server) render(w http.ResponseWriter, code int, page string, d pageData) {
 	d.Version = s.version
+	d.UI = s.cfg.UI
+	d.Help = helpParagraphs(s.cfg.UI.LoginHelp)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(code)
-	if err := s.pages[page].Execute(w, d); err != nil {
+	if err := s.pages[page].ExecuteTemplate(w, page+".html", d); err != nil {
 		s.log.Error("render failed", "page", page, "err", err)
 	}
 }
@@ -217,7 +256,8 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/home", http.StatusSeeOther)
 		return
 	}
-	s.render(w, http.StatusOK, "login", pageData{Error: loginErrors[r.URL.Query().Get("e")]})
+	q := r.URL.Query()
+	s.render(w, http.StatusOK, "login", pageData{Error: loginErrors[q.Get("e")], Expired: q.Get("expired") == "1"})
 }
 
 // failureCode picks the ?e= code for a failed login.
@@ -329,6 +369,39 @@ func (s *server) listing(r *http.Request, sess *session.Session) *clusters.Listi
 	return l
 }
 
+// siteNotices explains, in end-user words, why a site's clusters are missing.
+func siteNotices(sites []auth.SiteResult, l *clusters.Listing) []string {
+	var out []string
+	for _, st := range sites {
+		switch st.Status {
+		case auth.StatusUnavailable, auth.StatusBadResponse:
+			out = append(out, st.Site+" couldn't be reached when you signed in. Its clusters aren't shown. Sign in again to retry.")
+		case auth.StatusRejected:
+			out = append(out, st.Site+" didn't accept your sign-in. Its clusters aren't shown.")
+		}
+	}
+	if l != nil {
+		for _, sl := range l.Sites {
+			if sl.Status == "error" {
+				out = append(out, "Couldn't load clusters from "+sl.Site+". Try Refresh.")
+			}
+		}
+	}
+	return out
+}
+
+// ago renders an age as "just now", "N min ago" or "N h ago".
+func ago(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%d min ago", int(d/time.Minute))
+	default:
+		return fmt.Sprintf("%d h ago", int(d/time.Hour))
+	}
+}
+
 func (s *server) home(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.current(r)
 	if !ok {
@@ -337,16 +410,34 @@ func (s *server) home(w http.ResponseWriter, r *http.Request) {
 	}
 	l := s.listing(r, sess)
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	s.render(w, http.StatusOK, "home", pageData{Session: sess, Listing: l, Rows: l.Filter(q), Query: q})
-}
-
-func (s *server) diagnostics(w http.ResponseWriter, r *http.Request) {
-	sess, ok := s.current(r)
-	if !ok {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
+	// Chips list the sites the user is logged in to; with one site there is
+	// nothing to filter.
+	var chips []string
+	if len(s.cfg.Sites) > 1 {
+		for _, cs := range s.cfg.Sites {
+			for _, st := range sess.Sites {
+				if st.Site == cs.Name && st.Status == auth.StatusOK {
+					chips = append(chips, cs.Name)
+				}
+			}
+		}
 	}
-	s.render(w, http.StatusOK, "diagnostics", pageData{Session: sess, Listing: s.listing(r, sess)})
+	site := r.URL.Query().Get("site")
+	if !slices.Contains(chips, site) {
+		site = ""
+	}
+	rows := l.Filter(q)
+	if site != "" {
+		var in []clusters.Row
+		for _, row := range rows {
+			if row.Site == site {
+				in = append(in, row)
+			}
+		}
+		rows = in
+	}
+	s.render(w, http.StatusOK, "home", pageData{Session: sess, Listing: l, Rows: rows, Query: q, Sites: chips, Site: site,
+		SiteNotices: siteNotices(sess.Sites, l), Count: len(rows), UpdatedAgo: ago(s.now().Sub(l.Fetched))})
 }
 
 func (s *server) refresh(w http.ResponseWriter, r *http.Request) {
@@ -372,14 +463,72 @@ func (s *server) cluster(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
+	// A bad or repeated ?c= is dropped rather than shown as an error.
+	cs, hasC := r.URL.Query()["c"]
+	if hasC && (len(cs) != 1 || !a2a.ValidUUID(cs[0])) {
+		http.Redirect(w, r, "/clusters/"+url.PathEscape(r.PathValue("site"))+"/"+url.PathEscape(r.PathValue("id")), http.StatusSeeOther)
+		return
+	}
 	row, found := s.listing(r, sess).Find(r.PathValue("site"), r.PathValue("id"))
 	if !found {
 		http.Error(w, "cluster not found", http.StatusNotFound)
 		return
 	}
 	res := s.cl.Check(r.Context(), sess.Sites, row, sess.Principal)
-	s.render(w, http.StatusOK, "cluster", pageData{Session: sess, Row: row, Check: res,
-		ContextID: a2a.NewUUID(), MaxMessage: s.cfg.Chat.MaxMessageBytes})
+	if res.Outcome == clusters.OutcomeExpired {
+		s.expireRedirect(w, r, sess)
+		return
+	}
+	d := pageData{Session: sess, Row: row, Check: res}
+	if res.Outcome != clusters.OutcomeReady {
+		s.render(w, http.StatusOK, "cluster", d)
+		return
+	}
+	convs, err := s.hist.List(r.Context(), sess.Sites, row)
+	switch {
+	case errors.Is(err, history.ErrExpired):
+		s.expireRedirect(w, r, sess)
+		return
+	case errors.Is(err, history.ErrForbidden):
+		d.HistoryError = "unavailable"
+	case err != nil:
+		s.log.Warn("conversation list failed", "event", "history_failed", "site", row.Site, "cluster", row.ID, "err", err)
+		d.HistoryError = "failed"
+	}
+	d.Conversations = convs
+	if hasC {
+		d.Current = cs[0]
+	}
+	d.ContextID = d.Current
+	if d.ContextID == "" {
+		d.ContextID = a2a.NewUUID()
+	}
+	d.MaxMessage = s.cfg.Chat.MaxMessageBytes
+	d.MaxDurationMS = s.cfg.Chat.MaxDuration.Milliseconds()
+	s.render(w, http.StatusOK, "cluster", d)
+}
+
+// expire ends sess like /logout: the session is removed at once and its
+// Rancher tokens are revoked in the background.
+func (s *server) expire(sess *session.Session) {
+	if _, ok := s.store.Delete(sess.ID); !ok {
+		return // already ended by a concurrent request
+	}
+	s.log.Info("session expired", "event", "session_expired", "username", sess.Username, "principal", sess.Principal)
+	// Not tied to any request: a closed tab must not orphan the tokens.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), logoutTimeout)
+		defer cancel()
+		s.authn.Logout(ctx, sess.Sites)
+	}()
+}
+
+// expireRedirect ends sess, clears the cookie and sends the browser to the
+// login page with the session-expired notice.
+func (s *server) expireRedirect(w http.ResponseWriter, r *http.Request, sess *session.Session) {
+	s.expire(sess)
+	s.setCookie(w, "", -1)
+	http.Redirect(w, r, "/?expired=1", http.StatusSeeOther)
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {

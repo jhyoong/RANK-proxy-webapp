@@ -2,6 +2,7 @@ package clusters_test
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
@@ -163,5 +164,43 @@ func TestCheck_LogFields(t *testing.T) {
 	}
 	if strings.Contains(out, e.sites[0].Token.Bearer) {
 		t.Fatal("bearer logged")
+	}
+}
+
+func checkLine(t *testing.T, logs *syncBuf) map[string]any {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(line), &m) == nil && m["event"] == "cluster_check" {
+			return m
+		}
+	}
+	t.Fatalf("no cluster_check line: %s", logs.String())
+	return nil
+}
+
+func TestCheck_LogParity(t *testing.T) {
+	e, _, row := checkSetup(t, 5*time.Second, cl("c-1", "one"))
+	r := e.svc.Check(context.Background(), e.sites, row, principal)
+	m := checkLine(t, e.logs)
+	for _, k := range []string{"ssar_reason", "ssar_http_code", "error"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("missing %s in %v", k, m)
+		}
+	}
+	if m["card_name"] != r.Card.Name || m["card_version"] != r.Card.Version || m["card_streaming"] != r.Card.Streaming {
+		t.Errorf("card fields = %v, card %+v", m, r.Card)
+	}
+
+	c := cl("c-2", "two")
+	c.SSARStatus = 500
+	e, _, row = checkSetup(t, 5*time.Second, c)
+	r = e.svc.Check(context.Background(), e.sites, row, principal)
+	m = checkLine(t, e.logs)
+	if m["ssar_http_code"] != float64(500) || m["error"] != r.Error || r.Error == "" {
+		t.Errorf("ssar failure fields = %v", m)
+	}
+	if _, ok := m["card_name"]; ok {
+		t.Errorf("card_name logged without a card: %v", m)
 	}
 }

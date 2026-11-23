@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jhyoong/RANK-proxy-webapp/internal/a2a"
@@ -31,9 +32,21 @@ type Progress struct {
 	Partial bool   `json:"partial"`
 }
 
-// Tool names a tool the agent called.
+// Tool is a tool the agent called, with its formatted arguments and a short
+// one-line summary of them.
 type Tool struct {
-	Name string `json:"name"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Args    string `json:"args"`
+	Summary string `json:"summary"`
+}
+
+// ToolResult is the outcome of a tool call (event "tool_result").
+type ToolResult struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Result  string `json:"result"`
+	IsError bool   `json:"is_error"`
 }
 
 // Answer is agent text from a final event or an artifact.
@@ -49,6 +62,11 @@ type State struct {
 // Error is user-facing copy for a failed reply.
 type Error struct {
 	Message string `json:"message"`
+	Code    string `json:"code,omitempty"` // "expired" when the session has lapsed
+	// Running is true when kagent may still be running the turn (the reply
+	// was cut, timed out or broke mid-stream), so the browser should follow
+	// the stored transcript before allowing another message.
+	Running bool `json:"running,omitempty"`
 }
 
 // Done is always the last Out of a reply.
@@ -99,6 +117,19 @@ type reply struct {
 
 func (r *reply) fail(result, msg string) { r.result, r.errMsg = result, msg }
 
+// mayStillRun reports whether kagent may still be running the turn after
+// this failure: the portal stopped waiting, but nothing says the turn ended.
+// Errors from Rancher before the stream and agent-reported ends are final.
+func (r *reply) mayStillRun() bool {
+	switch r.result {
+	case "cut-off", "idle-timeout", "timeout":
+		return true
+	case "unexpected":
+		return r.httpCode == 200 // a bad event mid-stream, not a bad status
+	}
+	return false
+}
+
 type next struct {
 	ev  a2a.Event
 	err error
@@ -111,7 +142,12 @@ func (s *Service) Send(ctx context.Context, sites []auth.SiteResult, row cluster
 	r := &reply{start: s.now()}
 	defer func() {
 		if r.errMsg != "" {
-			emit(Out{Type: "error", Data: Error{Message: r.errMsg}})
+			e := Error{Message: r.errMsg}
+			if r.result == "expired" {
+				e.Code = "expired"
+			}
+			e.Running = r.mayStillRun()
+			emit(Out{Type: "error", Data: e})
 		}
 		total := s.now().Sub(r.start)
 		emit(Out{Type: "done", Data: Done{
@@ -200,7 +236,7 @@ func (s *Service) preStreamError(parent, rctx context.Context, site string, err 
 		case 502:
 			r.fail("unreachable", "Cluster unreachable through Rancher")
 		default:
-			r.fail("unexpected", fmt.Sprintf("Unexpected response (HTTP %d)", se.Code))
+			r.fail("unexpected", "Unexpected response from the cluster. Try again, or contact your platform team.")
 		}
 	case parent.Err() != nil:
 		r.result = "cancelled"
@@ -215,11 +251,37 @@ func (s *Service) preStreamError(parent, rctx context.Context, site string, err 
 }
 
 func (s *Service) totalMsg() string {
-	return fmt.Sprintf("Reply took longer than %s and was stopped", s.cfg.MaxDuration)
+	return fmt.Sprintf("The reply took longer than %s and was stopped", humanDuration(s.cfg.MaxDuration))
 }
 
 func (s *Service) idleMsg() string {
-	return fmt.Sprintf("No response from the agent for %s; stopped", s.cfg.IdleTimeout)
+	return fmt.Sprintf("No response from the agent for %s, so the reply was stopped", humanDuration(s.cfg.IdleTimeout))
+}
+
+// humanDuration writes d for people, e.g. "10 minutes" or "1 hour 30
+// minutes", rounded up to whole seconds (at least "1 second").
+func humanDuration(d time.Duration) string {
+	secs := int64((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	unit := func(n int64, name string) string {
+		if n == 1 {
+			return "1 " + name
+		}
+		return fmt.Sprintf("%d %ss", n, name)
+	}
+	var parts []string
+	for _, u := range []struct {
+		size int64
+		name string
+	}{{3600, "hour"}, {60, "minute"}, {1, "second"}} {
+		if n := secs / u.size; n > 0 {
+			parts = append(parts, unit(n, u.name))
+			secs %= u.size
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // relay runs the main loop until the reply ends; it sets r's result.
@@ -310,8 +372,15 @@ func (s *Service) event(contextID string, ev a2a.Event, r *reply, emit func(Out)
 	}
 	// Tools follow the texts: the browser closes the open partial line on a
 	// tool, so a complete step's text must land first to replace it.
-	for _, name := range ev.Tools {
-		emit(Out{Type: "tool", Data: Tool{Name: name}})
+	for _, c := range ev.Calls {
+		if c.ID == "" && c.Name == "" {
+			continue // malformed call part
+		}
+		emit(Out{Type: "tool", Data: Tool{ID: c.ID, Name: c.Name, Args: a2a.FormatArgs(c.Args), Summary: a2a.ArgsSummary(c.Args)}})
+	}
+	for _, rs := range ev.Results {
+		text, isErr := a2a.FormatResult(rs.Response)
+		emit(Out{Type: "tool_result", Data: ToolResult{ID: rs.ID, Name: rs.Name, Result: text, IsError: isErr}})
 	}
 	if ev.State != "" && ev.State != r.state {
 		r.state = ev.State

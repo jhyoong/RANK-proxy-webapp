@@ -7,9 +7,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -196,4 +198,132 @@ func TestFakeChat_HangCancelled(t *testing.T) {
 	if got := e.f.ChatCancelled(); got != 1 {
 		t.Fatalf("ChatCancelled = %d", got)
 	}
+}
+
+func (e *chatEnv) get(t *testing.T, path string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", e.base+"/k8s/clusters/c-1/api/v1/namespaces/kagent/services/http:kagent-controller:8083/proxy/"+path, nil)
+	req.Header.Set("Authorization", "Bearer "+e.token)
+	resp, err := e.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var b bytes.Buffer
+	_, _ = b.ReadFrom(resp.Body)
+	return resp.StatusCode, b.String()
+}
+
+func TestFake_ChatRecordsSession(t *testing.T) {
+	e := newChatEnv(t, &ranchertest.Fake{})
+	resp, err := e.post(context.Background(), t, "C", "please list every pod now", "message/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readEvents(t, resp)
+
+	code, body := e.get(t, "api/sessions/agent/kagent/k8s-agent")
+	var list struct {
+		Error bool
+		Data  []struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			AgentID string `json:"agent_id"`
+		}
+	}
+	if err := json.Unmarshal([]byte(body), &list); code != 200 || err != nil || list.Error {
+		t.Fatalf("%d %v %s", code, err, body)
+	}
+	if len(list.Data) != 1 || list.Data[0].ID != "C" || list.Data[0].Name != "please list every po..." ||
+		list.Data[0].AgentID != "kagent__NS__k8s_agent" {
+		t.Fatalf("list %s", body)
+	}
+
+	code, body = e.get(t, "api/sessions/C/tasks")
+	var tasks struct {
+		Data []struct {
+			Status  struct{ State string }
+			History []struct {
+				Role  string
+				Parts []struct {
+					Kind     string
+					Metadata map[string]string
+				}
+			}
+		}
+	}
+	if err := json.Unmarshal([]byte(body), &tasks); code != 200 || err != nil {
+		t.Fatalf("%d %v %s", code, err, body)
+	}
+	if len(tasks.Data) != 1 || tasks.Data[0].Status.State != "completed" {
+		t.Fatalf("tasks %s", body)
+	}
+	var call bool
+	for _, m := range tasks.Data[0].History {
+		for _, p := range m.Parts {
+			call = call || (p.Kind == "data" && p.Metadata["kagent_type"] == "function_call")
+		}
+	}
+	if !call {
+		t.Fatalf("no function_call: %s", body)
+	}
+	if !strings.Contains(body, `Answer to \"please list every pod now\" (turn 1)`) {
+		t.Fatalf("final text: %s", body)
+	}
+
+	if code, body := e.get(t, "api/sessions/nope/tasks"); code != 404 || !strings.Contains(body, `"not found"`) {
+		t.Fatalf("unknown: %d %s", code, body)
+	}
+}
+
+func TestFake_SessionStatus(t *testing.T) {
+	e := newChatEnv(t, &ranchertest.Fake{Clusters: []ranchertest.FakeCluster{{ID: "c-1", SessionStatus: 403}}})
+	if code, _ := e.get(t, "api/sessions/agent/kagent/k8s-agent"); code != 403 {
+		t.Fatalf("code %d", code)
+	}
+}
+
+func TestFake_TasksStatus(t *testing.T) {
+	e := newChatEnv(t, &ranchertest.Fake{Clusters: []ranchertest.FakeCluster{{ID: "c-1", TasksStatus: 401,
+		Sessions: []ranchertest.FakeSession{{ID: "s1"}}}}})
+	if code, _ := e.get(t, "api/sessions/agent/kagent/k8s-agent"); code != 200 {
+		t.Fatalf("list code %d", code)
+	}
+	if code, _ := e.get(t, "api/sessions/s1/tasks"); code != 401 {
+		t.Fatalf("tasks code %d", code)
+	}
+}
+
+// Listing clusters while chats record sessions must not race on the cluster.
+func TestFake_ChatAndListConcurrent(t *testing.T) {
+	e := newChatEnv(t, &ranchertest.Fake{Clusters: []ranchertest.FakeCluster{{ID: "c-1", ChatSteps: []ranchertest.Step{}}}})
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				resp, err := e.post(context.Background(), t, fmt.Sprintf("ctx-%d-%d", g, i), "x", "message/stream")
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				readEvents(t, resp)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				req, _ := http.NewRequest("GET", e.base+"/v1/management.cattle.io.clusters", nil)
+				req.Header.Set("Authorization", "Bearer "+e.token)
+				resp, err := e.client.Do(req)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				resp.Body.Close()
+			}
+		}()
+	}
+	wg.Wait()
 }

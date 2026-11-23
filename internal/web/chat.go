@@ -16,6 +16,7 @@ import (
 	"github.com/jhyoong/RANK-proxy-webapp/internal/auth"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/chat"
 	"github.com/jhyoong/RANK-proxy-webapp/internal/clusters"
+	"github.com/jhyoong/RANK-proxy-webapp/internal/history"
 )
 
 // Chat is what the web layer needs from chat.Service. Send emits done last
@@ -90,13 +91,60 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
 	_ = rc.Flush()
+	expired := false
 	s.ch.Send(r.Context(), sess.Sites, row, sess.Principal, req.Text, req.ContextID, func(o chat.Out) {
+		if e, ok := o.Data.(chat.Error); ok && o.Type == "error" && e.Code == "expired" {
+			expired = true
+		}
 		// A write error means the browser went away; Send sees the
 		// cancelled context and finishes.
 		if writeEvent(w, o) == nil {
 			_ = rc.Flush()
 		}
 	})
+	// The headers are sent, so the cookie stays; the browser's next request
+	// finds no session.
+	if expired {
+		s.expire(sess)
+	}
+}
+
+// transcript returns one past conversation as JSON. The cluster page has
+// already run the kagent check, so this doesn't.
+func (s *server) transcript(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.current(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not_logged_in"})
+		return
+	}
+	row, found := s.listing(r, sess).Find(r.PathValue("site"), r.PathValue("id"))
+	cid := r.PathValue("cid")
+	if !found || !a2a.ValidUUID(cid) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	}
+	tr, err := s.hist.Transcript(r.Context(), sess.Sites, row, cid)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, tr)
+	case errors.Is(err, history.ErrNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found"})
+	case errors.Is(err, history.ErrExpired):
+		s.expire(sess)
+		s.setCookie(w, "", -1)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "expired"})
+	case errors.Is(err, history.ErrForbidden):
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+	default:
+		s.log.Warn("transcript failed", "event", "history_failed", "site", row.Site, "cluster", row.ID, "err", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed"})
+	}
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 // claim marks a session as having a running reply. It reports false if one
