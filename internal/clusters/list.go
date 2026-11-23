@@ -131,7 +131,32 @@ func (s *Service) List(ctx context.Context, sites []auth.SiteResult) *Listing {
 	for i, sl := range l.Sites {
 		ls[i] = logSite{sl.Site, sl.Status, sl.HTTPCode, sl.Count, sl.Latency.Milliseconds()}
 	}
-	s.log.Info("clusters", "event", "clusters_list", "sites", ls)
+	// Only unhealthy clusters are listed, which keeps the line small.
+	type notConnected struct {
+		Site            string `json:"site"`
+		ID              string `json:"id"`
+		Name            string `json:"name"`
+		State           string `json:"state"`
+		ConnectedReason string `json:"connected_reason"`
+		ReadyReason     string `json:"ready_reason"`
+	}
+	nc := []notConnected{}
+	for _, r := range l.Rows {
+		if r.Connected {
+			continue
+		}
+		e := notConnected{Site: r.Site, ID: r.ID, Name: r.DisplayName, State: r.State}
+		for _, c := range r.Conditions {
+			switch c.Type {
+			case "Connected":
+				e.ConnectedReason = c.Reason
+			case "Ready":
+				e.ReadyReason = c.Reason
+			}
+		}
+		nc = append(nc, e)
+	}
+	s.log.Info("clusters", "event", "clusters_list", "sites", ls, "not_connected", nc)
 	// One WARN per failed site, after Wait so the order is config order.
 	for _, sl := range l.Sites {
 		if sl.Status == "error" {

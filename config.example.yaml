@@ -83,3 +83,15 @@ chat:
   max_message_bytes: 8192  # longest message a user can send (1 to 65536)
   heartbeat: 15s           # comment line sent to the browser while upstream is silent
   log_events: false        # log the shape (never content) of every upstream event; on for live tests
+
+ui:
+  # Announcement at the top of the login page. Plain text, one line, max 300 characters.
+  banner: ""
+  # Banner style: info (blue) or warning (amber). Default info.
+  banner_level: info
+  # Help box on the login page, max 2000 characters. Plain text; blank lines
+  # separate paragraphs; http(s) URLs and email addresses become links.
+  login_help: ""
+  # Support contact (bare address) shown on the login page, the unavailable
+  # screen, error messages and the user menu, as a mailto: link.
+  support_email: ""

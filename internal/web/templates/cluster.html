@@ -1,43 +1,44 @@
+{{template "shell" .}}
+{{define "crumbs"}}<li><a href="/home">Clusters</a></li><li aria-current="page">{{.Row.DisplayName}}</li>{{end}}
 {{define "content"}}
-<h2>{{.Row.DisplayName}}</h2>
-<p class="meta">Site {{.Row.Site}} · ID <code>{{.Row.ID}}</code></p>
-<p class="result-{{.Check.Outcome}}">{{.Check.Message}}</p>
-{{with .Check.Card}}
-<table>
-  <tbody>
-  <tr><th>Agent</th><td>{{.Name}}</td></tr>
-  <tr><th>Description</th><td>{{.Description}}</td></tr>
-  <tr><th>Version</th><td>{{.Version}}</td></tr>
-  <tr><th>Streaming</th><td>{{.Streaming}}</td></tr>
-  </tbody>
-</table>
-{{end}}
-<h3>Diagnostics</h3>
-<table>
-  <tbody>
-  <tr><th>Outcome</th><td>{{.Check.Outcome}}</td></tr>
-  <tr><th>SSAR allowed</th><td>{{if .Check.SSARAllowed}}{{.Check.SSARAllowed | deref}}{{end}}</td></tr>
-  <tr><th>SSAR reason</th><td>{{.Check.SSARReason}}</td></tr>
-  <tr><th>SSAR HTTP</th><td>{{if .Check.SSARCode}}{{.Check.SSARCode}}{{end}}</td></tr>
-  <tr><th>SSAR latency</th><td>{{if .Check.SSARLatency}}{{.Check.SSARLatency.Milliseconds}} ms{{end}}</td></tr>
-  <tr><th>Card HTTP</th><td>{{if .Check.CardCode}}{{.Check.CardCode}}{{end}}</td></tr>
-  <tr><th>Card latency</th><td>{{if .Check.CardLatency}}{{.Check.CardLatency.Milliseconds}} ms{{end}}</td></tr>
-  <tr><th>Error</th><td>{{.Check.Error}}</td></tr>
-  </tbody>
-</table>
 {{if eq .Check.Outcome "ready"}}
-<section id="chat" data-chat-url="/clusters/{{esc .Row.Site}}/{{esc .Row.ID}}/chat" data-csrf="{{.Session.CSRF}}" data-context-id="{{.ContextID}}">
-  <div id="log" aria-live="polite"></div>
-  <textarea id="msg" maxlength="{{.MaxMessage}}" rows="3" placeholder="Ask the agent (Ctrl+Enter to send)"></textarea>
-  <div class="actions">
-    <button id="send" type="button">Send</button>
-    <button id="stop" disabled type="button">Stop</button>
-    <a id="new" href="/clusters/{{esc .Row.Site}}/{{esc .Row.ID}}">New conversation</a>
-  </div>
-</section>
+<input type="checkbox" id="sidebar-toggle">
+<label class="sidebar-toggle" for="sidebar-toggle"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>Conversations</label>
+<div class="chat-layout">
+  <aside class="sidebar" aria-label="Conversations">
+    <a class="btn btn-primary btn-new" href="/clusters/{{esc .Row.Site}}/{{esc .Row.ID}}">+ New conversation</a>
+    <p class="sidebar-note">Conversations on this cluster are shared with everyone who can use kagent here.</p>
+    {{if eq .HistoryError "unavailable"}}<p class="notice">Conversation history isn't available for your account</p>
+    {{else if eq .HistoryError "failed"}}<p class="notice">Couldn't load conversation history. <a href="/clusters/{{esc .Row.Site}}/{{esc .Row.ID}}{{with .Current}}?c={{.}}{{end}}">Retry</a></p>
+    {{end}}
+    <ul id="convs">
+      {{range .Conversations}}<li><a href="?c={{.ID}}" data-updated="{{rfc3339 .Updated}}"{{if eq .ID $.Current}} aria-current="page"{{end}}>{{.Title}}</a></li>
+      {{end}}
+    </ul>
+  </aside>
+  <section id="chat" class="chat-main" data-chat-url="/clusters/{{esc .Row.Site}}/{{esc .Row.ID}}/chat"{{with .Current}} data-transcript-url="/clusters/{{esc $.Row.Site}}/{{esc $.Row.ID}}/conversations/{{.}}"{{end}} data-csrf="{{.Session.CSRF}}" data-context-id="{{.ContextID}}" data-cluster-name="{{.Row.DisplayName}}" data-support-email="{{.UI.SupportEmail}}" data-max-duration-ms="{{.MaxDurationMS}}">
+    <div id="log" aria-live="polite"></div>
+    <p class="empty">Ask kagent about {{.Row.DisplayName}}</p>
+    <div class="composer">
+      <textarea id="msg" maxlength="{{.MaxMessage}}" rows="2" placeholder="Ask kagent about this cluster…" aria-label="Message"></textarea>
+      <div class="composer-actions">
+        <span id="count"></span>
+        <button id="stop" type="button" class="btn" hidden>Stop</button>
+        <button id="send" type="button" class="btn btn-primary">Send</button>
+      </div>
+    </div>
+  </section>
+</div>
+<script src="/static/markdown.js" defer></script>
 <script src="/static/chat.js" defer></script>
 {{else}}
-<p><button disabled>Chat unavailable: {{.Check.Message}}</button></p>
+<div class="card unavailable">
+  <svg class="icon unavailable-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.75 14.75 13.5H1.25z"/><path d="M8 6v3.5M8 11.5v.01"/></svg>
+  <h1>kagent isn't available on this cluster</h1>
+  <p>It may not be installed, may not be running, or your account may not have access to it.</p>
+  {{with .UI.SupportEmail}}<p class="notice">Contact the platform team at <a href="mailto:{{.}}">{{.}}</a></p>{{else}}<p class="notice">Contact your platform team.</p>{{end}}
+  <p class="reference">Reference: {{.Check.Outcome}} · {{.Row.DisplayName}}</p>
+  <a class="btn" href="/home">← Back to clusters</a>
+</div>
 {{end}}
-<p><a href="/home">Back to clusters</a></p>
 {{end}}

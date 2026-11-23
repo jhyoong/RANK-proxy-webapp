@@ -3,6 +3,7 @@ package auth_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -369,4 +370,30 @@ func TestLogin_TimeoutFlag(t *testing.T) {
 			t.Fatalf("got %+v", r.Sites[0])
 		}
 	})
+}
+
+func TestLogin_NoADPrincipalLogged(t *testing.T) {
+	fs := fakes()
+	for _, f := range fs {
+		f.Users["jdoe"] = ranchertest.FakeUser{Password: "pw", ID: "u-1", PrincipalIDs: []string{"local://u-1"}}
+	}
+	e := setup(t, fs, 5*time.Second)
+	e.a.Login(context.Background(), "jdoe", "pw")
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(e.logs.String()), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(line), &m) != nil || m["event"] != "no_principal" {
+			continue
+		}
+		found = true
+		if m["level"] != "WARN" || m["msg"] != "no activedirectory_user principal found on any site" {
+			t.Errorf("line = %v", m)
+		}
+		if _, ok := m["sites"].([]any); !ok {
+			t.Errorf("sites missing: %v", m)
+		}
+	}
+	if !found {
+		t.Fatalf("no no_principal line: %s", e.logs.String())
+	}
 }

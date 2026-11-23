@@ -38,7 +38,7 @@ type CheckResult struct {
 	CardCode    int // 0 if not run / transport error
 	CardLatency time.Duration
 	Card        *rancher.Card
-	Error       string // short technical detail for the diagnostics table
+	Error       string // short technical detail for the logs
 }
 
 func expiredMsg(site string) string {
@@ -57,7 +57,12 @@ func (s *Service) Check(ctx context.Context, sites []auth.SiteResult, row Row, p
 		}
 		args := []any{"event", "cluster_check", "site", row.Site, "cluster", row.ID, "principal", principal,
 			"ssar_allowed", allowed, "ssar_ms", res.SSARLatency.Milliseconds(),
-			"card_http_code", res.CardCode, "card_ms", res.CardLatency.Milliseconds(), "result", string(res.Outcome)}
+			"ssar_reason", res.SSARReason, "ssar_http_code", res.SSARCode,
+			"card_http_code", res.CardCode, "card_ms", res.CardLatency.Milliseconds(), "result", string(res.Outcome),
+			"error", res.Error}
+		if c := res.Card; c != nil {
+			args = append(args, "card_name", c.Name, "card_version", c.Version, "card_streaming", c.Streaming)
+		}
 		if rancherBody != "" {
 			args = append(args, "rancher_body", rancherBody)
 		}

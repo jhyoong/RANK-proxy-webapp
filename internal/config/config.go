@@ -6,11 +6,13 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net/mail"
 	"net/netip"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -26,6 +28,7 @@ type Config struct {
 	Clusters     ClustersConfig `yaml:"clusters"`
 	API          APIConfig      `yaml:"api"`
 	Chat         ChatConfig     `yaml:"chat"`
+	UI           UIConfig       `yaml:"ui"`
 	// Sites are tried in order at login; Sites[0] is "site 1".
 	Sites []Site `yaml:"sites"`
 }
@@ -94,6 +97,19 @@ type ChatConfig struct {
 	Heartbeat time.Duration `yaml:"heartbeat"`
 	// LogEvents logs the shape (never content) of every upstream event.
 	LogEvents bool `yaml:"log_events"`
+}
+
+// UIConfig holds optional end-user text shown by the web UI. Empty means the
+// element is not shown.
+type UIConfig struct {
+	// Banner is a one-line announcement at the top of the login page.
+	Banner string `yaml:"banner"`
+	// BannerLevel styles the banner: "info" (default) or "warning".
+	BannerLevel string `yaml:"banner_level"`
+	// LoginHelp is a help box on the login page; blank lines separate paragraphs.
+	LoginHelp string `yaml:"login_help"`
+	// SupportEmail is a bare address shown as a mailto: link.
+	SupportEmail string `yaml:"support_email"`
 }
 
 // Site is one Rancher site.
@@ -184,6 +200,9 @@ func (c *Config) applyDefaults() {
 	if c.Chat.Heartbeat == 0 {
 		c.Chat.Heartbeat = 15 * time.Second
 	}
+	if c.UI.BannerLevel == "" {
+		c.UI.BannerLevel = "info"
+	}
 }
 
 func (c *Config) validate() error {
@@ -230,6 +249,24 @@ func (c *Config) validate() error {
 	}
 	if c.Chat.IdleTimeout > c.Chat.MaxDuration {
 		return errors.New("chat: idle_timeout must not exceed max_duration")
+	}
+	if c.UI.BannerLevel != "info" && c.UI.BannerLevel != "warning" {
+		return fmt.Errorf("ui.banner_level %q must be info or warning", c.UI.BannerLevel)
+	}
+	if utf8.RuneCountInString(c.UI.Banner) > 300 {
+		return errors.New("ui.banner must be at most 300 characters")
+	}
+	if strings.ContainsAny(c.UI.Banner, "\r\n") {
+		return errors.New("ui.banner must be a single line")
+	}
+	if utf8.RuneCountInString(c.UI.LoginHelp) > 2000 {
+		return errors.New("ui.login_help must be at most 2000 characters")
+	}
+	if e := c.UI.SupportEmail; e != "" {
+		addr, err := mail.ParseAddress(e)
+		if err != nil || addr.Name != "" || addr.Address != e {
+			return fmt.Errorf("ui.support_email %q must be a bare email address", e)
+		}
 	}
 	for _, f := range []struct{ name, v string }{
 		{"namespace", c.Kagent.Namespace},

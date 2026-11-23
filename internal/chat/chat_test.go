@@ -159,6 +159,21 @@ func chatLine(t *testing.T, logs string) map[string]any {
 	return found[0]
 }
 
+// wantRunning checks the error's Running flag: whether kagent may still be
+// running the turn, so the browser should poll the transcript.
+func wantRunning(t *testing.T, outs []chat.Out, want bool) {
+	t.Helper()
+	for _, o := range outs {
+		if d, ok := o.Data.(chat.Error); ok {
+			if d.Running != want {
+				t.Fatalf("error %+v: running = %v, want %v", d, d.Running, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("no error in %v", types(outs))
+}
+
 func wantResult(t *testing.T, logs, result string) {
 	t.Helper()
 	if got := chatLine(t, logs)["result"]; got != result {
@@ -264,11 +279,12 @@ func TestSend_PreStreamCodes(t *testing.T) {
 		{404, "kagent or the agent isn't installed on this cluster", "not-installed"},
 		{503, "kagent is installed but not running", "not-running"},
 		{502, "Cluster unreachable through Rancher", "unreachable"},
-		{418, "Unexpected response (HTTP 418)", "unexpected"},
+		{418, "Unexpected response from the cluster. Try again, or contact your platform team.", "unexpected"},
 	} {
 		e := setup(t, ranchertest.FakeCluster{ChatStatus: tc.code}, baseCfg())
 		outs := e.send(t, context.Background(), "hi", a2a.NewUUID())
 		wantSingleError(t, outs, tc.msg)
+		wantRunning(t, outs, false)
 		if len(outs) != 2 {
 			t.Fatalf("%d: outs = %v", tc.code, types(outs))
 		}
@@ -302,6 +318,7 @@ func TestSend_JSONRPCError(t *testing.T) {
 	outs := e.send(t, context.Background(), "hi", a2a.NewUUID())
 	wantSingleError(t, outs, "Agent error: boom")
 	wantResult(t, e.logs.String(), "error")
+	wantRunning(t, outs, false)
 
 	long := strings.Repeat("é", 400)
 	e = setup(t, ranchertest.FakeCluster{ChatSteps: []ranchertest.Step{
@@ -321,6 +338,7 @@ func TestSend_FailedState(t *testing.T) {
 		t.Fatalf("done = %+v", d)
 	}
 	wantResult(t, e.logs.String(), "failed")
+	wantRunning(t, outs, false)
 }
 
 func TestSend_InputRequired(t *testing.T) {
@@ -330,6 +348,7 @@ func TestSend_InputRequired(t *testing.T) {
 	outs := e.send(t, context.Background(), "hi", a2a.NewUUID())
 	wantSingleError(t, outs, "The agent is asking for approval, which the portal doesn't support yet")
 	wantResult(t, e.logs.String(), "input-required")
+	wantRunning(t, outs, false)
 }
 
 func TestSend_EOFWithoutFinal(t *testing.T) {
@@ -340,6 +359,7 @@ func TestSend_EOFWithoutFinal(t *testing.T) {
 		t.Fatalf("done = %+v", d)
 	}
 	wantResult(t, e.logs.String(), "cut-off")
+	wantRunning(t, outs, true)
 }
 
 func TestSend_MalformedEvent(t *testing.T) {
@@ -349,6 +369,7 @@ func TestSend_MalformedEvent(t *testing.T) {
 	outs := e.send(t, context.Background(), "hi", a2a.NewUUID())
 	wantSingleError(t, outs, "Unexpected event from the agent")
 	wantResult(t, e.logs.String(), "unexpected")
+	wantRunning(t, outs, true)
 }
 
 func TestSend_UnknownKindIgnored(t *testing.T) {
@@ -373,8 +394,9 @@ func TestSend_IdleTimeout(t *testing.T) {
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("took %v", d)
 	}
-	wantSingleError(t, outs, "No response from the agent for 200ms; stopped")
+	wantSingleError(t, outs, "No response from the agent for 1 second, so the reply was stopped")
 	wantResult(t, e.logs.String(), "idle-timeout")
+	wantRunning(t, outs, true)
 	waitCancelled(t, e.f)
 }
 
@@ -391,8 +413,9 @@ func TestSend_TotalTimeout(t *testing.T) {
 	if d := time.Since(start); d > 1500*time.Millisecond {
 		t.Fatalf("took %v", d)
 	}
-	wantSingleError(t, outs, "Reply took longer than 300ms and was stopped")
+	wantSingleError(t, outs, "The reply took longer than 1 second and was stopped")
 	wantResult(t, e.logs.String(), "timeout")
+	wantRunning(t, outs, true)
 	waitCancelled(t, e.f)
 }
 
@@ -564,6 +587,89 @@ func TestSend_HeaderTimeout(t *testing.T) {
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("took %v", d)
 	}
-	wantSingleError(t, outs, "No response from the agent for 150ms; stopped")
+	wantSingleError(t, outs, "No response from the agent for 1 second, so the reply was stopped")
 	wantResult(t, e.logs.String(), "idle-timeout")
+	wantRunning(t, outs, true)
+}
+
+func TestSend_ToolEventsCarryArgsAndResults(t *testing.T) {
+	msg := func(parts string) string {
+		return `{"jsonrpc":"2.0","id":"1","result":{"kind":"status-update","taskId":"t1","contextId":"c","final":false,` +
+			`"status":{"state":"working","message":{"kind":"message","messageId":"m","role":"agent","parts":[` + parts + `]}}}}`
+	}
+	call := `{"kind":"data","data":{"id":"call_1","name":"k8s_get_resources","args":{"namespace":"kagent","resource_type":"pod"}},"metadata":{"kagent_type":"function_call"}}`
+	resp := `{"kind":"data","data":{"id":"call_1","name":"k8s_get_resources","response":{"content":[{"type":"text","text":"NAME READY"}],"isError":false}},"metadata":{"kagent_type":"function_response"}}`
+	steps := []ranchertest.Step{step(msg(call)), step(msg(resp)), step(finalState("completed"))}
+	e := setup(t, ranchertest.FakeCluster{ChatSteps: steps}, baseCfg())
+	outs := e.send(t, context.Background(), "hi", a2a.NewUUID())
+	var tool *chat.Tool
+	var res *chat.ToolResult
+	for _, o := range outs {
+		switch d := o.Data.(type) {
+		case chat.Tool:
+			tool = &d
+		case chat.ToolResult:
+			if o.Type != "tool_result" {
+				t.Fatalf("result type = %q", o.Type)
+			}
+			res = &d
+		}
+	}
+	if tool == nil || tool.ID != "call_1" || tool.Name != "k8s_get_resources" || tool.Args == "" || tool.Summary == "" {
+		t.Fatalf("tool = %+v", tool)
+	}
+	if res == nil || res.ID != "call_1" || res.Name != "k8s_get_resources" || !strings.Contains(res.Result, "NAME READY") || res.IsError {
+		t.Fatalf("result = %+v", res)
+	}
+	ti, ri := -1, -1
+	for i, o := range outs {
+		if o.Type == "tool" {
+			ti = i
+		}
+		if o.Type == "tool_result" {
+			ri = i
+		}
+	}
+	if ti > ri {
+		t.Fatalf("tool after tool_result: %v", types(outs))
+	}
+}
+
+func TestSend_ExpiredHasCode(t *testing.T) {
+	e := setup(t, ranchertest.FakeCluster{ChatStatus: 401}, baseCfg())
+	outs := e.send(t, context.Background(), "hi", a2a.NewUUID())
+	var got *chat.Error
+	for _, o := range outs {
+		if d, ok := o.Data.(chat.Error); ok {
+			got = &d
+		}
+	}
+	if got == nil || got.Code != "expired" {
+		t.Fatalf("error = %+v", got)
+	}
+	e = setup(t, ranchertest.FakeCluster{ChatStatus: 403}, baseCfg())
+	for _, o := range e.send(t, context.Background(), "hi", a2a.NewUUID()) {
+		if d, ok := o.Data.(chat.Error); ok && d.Code != "" {
+			t.Fatalf("403 code = %q", d.Code)
+		}
+	}
+}
+
+func TestHumanDuration(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		200 * time.Millisecond:       "1 second",
+		time.Second:                  "1 second",
+		45 * time.Second:             "45 seconds",
+		1500 * time.Millisecond:      "2 seconds",
+		time.Minute:                  "1 minute",
+		10 * time.Minute:             "10 minutes",
+		90 * time.Second:             "1 minute 30 seconds",
+		time.Hour:                    "1 hour",
+		2*time.Hour + 30*time.Minute: "2 hours 30 minutes",
+		3*time.Hour + 5*time.Second:  "3 hours 5 seconds",
+	} {
+		if got := chat.HumanDuration(d); got != want {
+			t.Errorf("%v: got %q want %q", d, got, want)
+		}
+	}
 }

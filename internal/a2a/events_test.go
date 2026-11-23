@@ -78,8 +78,8 @@ func TestParse_StatusUpdateWithTextAndTool(t *testing.T) {
 	if len(ev.Texts) != 1 || ev.Texts[0].Text != "SECRET-TEXT" || ev.Texts[0].Partial {
 		t.Fatalf("texts = %+v", ev.Texts)
 	}
-	if len(ev.Tools) != 1 || ev.Tools[0] != "k8s_get_resources" {
-		t.Fatalf("tools = %v", ev.Tools)
+	if len(ev.Calls) != 1 || ev.Calls[0].Name != "k8s_get_resources" {
+		t.Fatalf("calls = %v", ev.Calls)
 	}
 	if !strings.Contains(ev.Shape, "meta=") || !strings.Contains(ev.Shape, "kagent_type") ||
 		!strings.Contains(ev.Shape, "status-update") || !strings.Contains(ev.Shape, "state=working") {
@@ -165,5 +165,28 @@ func TestParse_BadJSON(t *testing.T) {
 	_, err := NewReader(strings.NewReader("data: {nope\n\n")).Next()
 	if !errors.Is(err, ErrBadEvent) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestParseEvent_ToolCallAndResult(t *testing.T) {
+	ev := parseOne(t, `{"result":{"kind":"status-update","taskId":"t","status":{"state":"working","message":{"role":"agent","parts":[
+{"kind":"data","metadata":{"kagent_type":"function_call"},"data":{"id":"call_053d09de","name":"k8s_get_resources","args":{"namespace":"kagent","output":"wide","resource_type":"pod"}}}]}}}}`)
+	if len(ev.Calls) != 1 || ev.Calls[0].ID != "call_053d09de" || ev.Calls[0].Name != "k8s_get_resources" ||
+		!strings.Contains(string(ev.Calls[0].Args), `"namespace":"kagent"`) {
+		t.Fatalf("calls = %+v", ev.Calls)
+	}
+	ev = parseOne(t, `{"result":{"kind":"status-update","taskId":"t","status":{"state":"working","message":{"role":"agent","parts":[
+{"kind":"data","metadata":{"adk_type":"function_response"},"data":{"id":"call_053d09de","name":"k8s_get_resources","response":{"content":[{"type":"text","text":"NAME"}],"isError":false}}}]}}}}`)
+	if len(ev.Results) != 1 || ev.Results[0].ID != "call_053d09de" || len(ev.Calls) != 0 {
+		t.Fatalf("results = %+v", ev.Results)
+	}
+}
+
+func TestParseEvent_ParallelCalls(t *testing.T) {
+	ev := parseOne(t, `{"result":{"kind":"status-update","taskId":"t","status":{"state":"working","message":{"role":"agent","parts":[
+{"kind":"data","metadata":{"kagent_type":"function_call"},"data":{"id":"a","name":"one","args":{}}},
+{"kind":"data","metadata":{"kagent_type":"function_call"},"data":{"id":"b","name":"two","args":{}}}]}}}}`)
+	if len(ev.Calls) != 2 || ev.Calls[0].ID != "a" || ev.Calls[1].ID != "b" {
+		t.Fatalf("calls = %+v", ev.Calls)
 	}
 }

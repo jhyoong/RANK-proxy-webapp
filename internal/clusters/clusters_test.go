@@ -3,6 +3,7 @@ package clusters_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"sync"
@@ -277,6 +278,32 @@ func TestList_BadResponseWarnsWithCode(t *testing.T) {
 	for _, want := range []string{`"level":"WARN"`, `"site":"site-1"`, `"http_code":200`, `"error":"unexpected response from Rancher`} {
 		if !strings.Contains(warns[0], want) {
 			t.Fatalf("missing %s in %s", want, warns[0])
+		}
+	}
+}
+
+func TestList_LogsNotConnected(t *testing.T) {
+	down := ranchertest.FakeCluster{ID: "c-2", DisplayName: "two", State: "unavailable", Conditions: []ranchertest.Condition{
+		{Type: "Connected", Status: "False", Reason: "Disconnected"}, {Type: "Ready", Status: "False", Reason: "NotReady"}}}
+	e := setup(t, newFakes([]ranchertest.FakeCluster{cl("c-1", "one"), down}))
+	e.svc.List(context.Background(), e.sites)
+	var line map[string]any
+	for _, s := range strings.Split(strings.TrimSpace(e.logs.String()), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(s), &m) == nil && m["event"] == "clusters_list" {
+			line = m
+		}
+	}
+	nc, ok := line["not_connected"].([]any)
+	if !ok || len(nc) != 1 {
+		t.Fatalf("not_connected = %v (line %v)", line["not_connected"], line)
+	}
+	want := map[string]any{"site": "site-1", "id": "c-2", "name": "two", "state": "unavailable",
+		"connected_reason": "Disconnected", "ready_reason": "NotReady"}
+	got := nc[0].(map[string]any)
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %v, want %v", k, got[k], v)
 		}
 	}
 }

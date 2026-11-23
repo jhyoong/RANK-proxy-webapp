@@ -2,8 +2,10 @@ package ranchertest
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -82,7 +84,7 @@ func (f *Fake) ChatCancelled() int {
 	return f.chatCancelled
 }
 
-func (f *Fake) chat(w http.ResponseWriter, r *http.Request, cl *FakeCluster, user string) {
+func (f *Fake) chat(w http.ResponseWriter, r *http.Request, cl *FakeCluster, user, agentNS, agentName string) {
 	var body map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	f.mu.Lock()
@@ -111,6 +113,7 @@ func (f *Fake) chat(w http.ResponseWriter, r *http.Request, cl *FakeCluster, use
 	}
 	f.chatTurns[ctxID]++
 	turn := f.chatTurns[ctxID]
+	recordSession(cl, agentID(agentNS, agentName), ctxID, text, turn)
 	f.mu.Unlock()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -178,4 +181,156 @@ func parseChat(body map[string]any) (ctxID, text string, ok bool) {
 	}
 	text, ok = p["text"].(string)
 	return
+}
+
+// agentID is kagent's session agent_id for an agent: "<ns>__NS__<name>" with
+// '-' in the name replaced by '_'.
+func agentID(ns, name string) string {
+	return ns + "__NS__" + strings.ReplaceAll(name, "-", "_")
+}
+
+// recordSession stores the DefaultChat turn as a completed kagent task on the
+// session for ctxID, creating the session on its first turn. Caller holds f.mu.
+func recordSession(cl *FakeCluster, agent, ctxID, text string, turn int) {
+	now := time.Now().UTC()
+	final := `Answer to "` + text + `" (turn ` + strconv.Itoa(turn) + `)`
+	textPart := func(s string) map[string]any { return map[string]any{"kind": "text", "text": s} }
+	userMsg := map[string]any{"kind": "message", "role": "user", "messageId": fmt.Sprintf("u-%s-%d", ctxID, turn),
+		"parts": []any{textPart(text)}}
+	task := map[string]any{
+		"id": fmt.Sprintf("task-%s-%d", ctxID, turn), "contextId": ctxID, "kind": "task",
+		"status": map[string]any{"state": "completed", "timestamp": now.Format(time.RFC3339Nano)},
+		// kagent stores the user message twice per task.
+		"history": []any{userMsg, userMsg,
+			map[string]any{"kind": "message", "role": "agent", "messageId": fmt.Sprintf("a1-%s-%d", ctxID, turn), "parts": []any{
+				map[string]any{"kind": "data", "metadata": map[string]any{"kagent_type": "function_call"},
+					"data": map[string]any{"id": "call_1", "name": "k8s_get_resources", "args": map[string]any{}}}}},
+			map[string]any{"kind": "message", "role": "agent", "messageId": fmt.Sprintf("a2-%s-%d", ctxID, turn), "parts": []any{
+				map[string]any{"kind": "data", "metadata": map[string]any{"kagent_type": "function_response"},
+					"data": map[string]any{"id": "call_1", "name": "k8s_get_resources", "response": map[string]any{
+						"content": []any{map[string]any{"type": "text", "text": "pod/web-1   Running"}}, "isError": false}}}}},
+			map[string]any{"kind": "message", "role": "agent", "messageId": fmt.Sprintf("a3-%s-%d", ctxID, turn),
+				"parts": []any{textPart(final)}},
+		},
+		"artifacts": []any{map[string]any{"artifactId": "a1", "parts": []any{textPart(final)}}},
+	}
+	for i := range cl.Sessions {
+		s := &cl.Sessions[i]
+		if s.ID != ctxID {
+			continue
+		}
+		var tasks []any
+		_ = json.Unmarshal([]byte(s.TasksJSON), &tasks)
+		b, _ := json.Marshal(append(tasks, task))
+		s.TasksJSON, s.Updated = string(b), now
+		return
+	}
+	name := text
+	if r := []rune(name); len(r) > 20 {
+		name = string(r[:20]) + "..."
+	}
+	b, _ := json.Marshal([]any{task})
+	cl.Sessions = append(cl.Sessions, FakeSession{ID: ctxID, Name: name, AgentID: agent, Updated: now, TasksJSON: string(b)})
+}
+
+// LastSessionsURL returns a copy of the URL of the most recent /api/sessions* request.
+func (f *Fake) LastSessionsURL() *url.URL {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sessionsURL == nil {
+		return nil
+	}
+	u := *f.sessionsURL
+	return &u
+}
+
+// LastSessionsHeaders returns a copy of the headers of the most recent /api/sessions* request.
+func (f *Fake) LastSessionsHeaders() http.Header {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sessionsHeaders.Clone()
+}
+
+// TasksCalls returns how many api/sessions/{id}/tasks requests reached a known cluster.
+func (f *Fake) TasksCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.tasksCalls
+}
+
+// sessionsPrelude records the request and applies the Deny, SessionStatus and TasksStatus
+// knobs. It reports whether the handler should go on.
+func (f *Fake) sessionsPrelude(w http.ResponseWriter, r *http.Request, cl *FakeCluster, user string, tasks bool) bool {
+	f.mu.Lock()
+	u := *r.URL
+	f.sessionsURL, f.sessionsHeaders = &u, r.Header.Clone()
+	if tasks {
+		f.tasksCalls++
+	}
+	f.mu.Unlock()
+	if cl.Deny[user] {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return false
+	}
+	if cl.SessionStatus != 0 {
+		http.Error(w, "forced", cl.SessionStatus)
+		return false
+	}
+	if tasks && cl.TasksStatus != 0 {
+		http.Error(w, "forced", cl.TasksStatus)
+		return false
+	}
+	return true
+}
+
+// sessionList serves GET api/sessions/agent/{ns}/{name}: the sessions for that
+// agent (or with no AgentID), newest first, in kagent's wrapped shape.
+func (f *Fake) sessionList(w http.ResponseWriter, r *http.Request, cl *FakeCluster, user, ns, name string) {
+	if !f.sessionsPrelude(w, r, cl, user, false) {
+		return
+	}
+	want := agentID(ns, name)
+	f.mu.Lock()
+	var ss []FakeSession
+	for _, s := range cl.Sessions {
+		if s.AgentID == "" || s.AgentID == want {
+			ss = append(ss, s)
+		}
+	}
+	f.mu.Unlock()
+	sort.SliceStable(ss, func(i, j int) bool { return ss[i].Updated.After(ss[j].Updated) })
+	data := make([]map[string]any, 0, len(ss))
+	for _, s := range ss {
+		d := map[string]any{"id": s.ID, "name": s.Name, "agent_id": s.AgentID}
+		if !s.Updated.IsZero() {
+			ts := s.Updated.UTC().Format(time.RFC3339Nano)
+			d["created_at"], d["updated_at"] = ts, ts
+		}
+		data = append(data, d)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"error": false, "data": data})
+}
+
+// sessionTasks serves GET api/sessions/{id}/tasks.
+func (f *Fake) sessionTasks(w http.ResponseWriter, r *http.Request, cl *FakeCluster, user, id string) {
+	if !f.sessionsPrelude(w, r, cl, user, true) {
+		return
+	}
+	f.mu.Lock()
+	tasks, found := "", false
+	for _, s := range cl.Sessions {
+		if s.ID == id {
+			tasks, found = s.TasksJSON, true
+		}
+	}
+	f.mu.Unlock()
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": true, "message": "not found"})
+		return
+	}
+	if strings.TrimSpace(tasks) == "" {
+		tasks = "[]"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"error":false,"data":` + tasks + `}`))
 }

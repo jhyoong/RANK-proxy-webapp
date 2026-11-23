@@ -234,3 +234,41 @@ func TestSessionMaxPerUser(t *testing.T) {
 		t.Fatal("negative accepted")
 	}
 }
+
+func TestUI_Defaults(t *testing.T) {
+	c, err := Load(writeConfig(t, minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.UI.BannerLevel != "info" || c.UI.Banner != "" || c.UI.LoginHelp != "" || c.UI.SupportEmail != "" {
+		t.Fatalf("bad ui defaults: %+v", c.UI)
+	}
+}
+
+func TestUI_Valid(t *testing.T) {
+	c, err := Load(writeConfig(t, minimal+"ui:\n  banner_level: warning\n  support_email: platform@example.com\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.UI.BannerLevel != "warning" || c.UI.SupportEmail != "platform@example.com" {
+		t.Fatalf("ui not loaded unchanged: %+v", c.UI)
+	}
+}
+
+func TestUI_Invalid(t *testing.T) {
+	cases := map[string]string{
+		"bad level":        "banner_level: loud",
+		"name and address": `support_email: "Jane <j@example.com>"`,
+		"not an address":   "support_email: nope",
+		"long banner":      "banner: " + strings.Repeat("a", 301),
+		"long help":        "login_help: " + strings.Repeat("a", 2001),
+		"banner newline":   `banner: "one\ntwo"`,
+	}
+	for name, line := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, minimal+"ui:\n  "+line+"\n")); err == nil {
+				t.Fatalf("expected error for %q", name)
+			}
+		})
+	}
+}

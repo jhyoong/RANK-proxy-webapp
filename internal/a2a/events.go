@@ -28,7 +28,8 @@ type Event struct {
 	State             string
 	Final             bool
 	Texts             []Text
-	Tools             []string
+	Calls             []ToolCall
+	Results           []ToolResult
 	ErrCode           int
 	ErrMessage        string
 	// Shape describes the event without content: kind, state, final, part
@@ -110,9 +111,7 @@ type rawPart struct {
 	Kind     string                     `json:"kind"`
 	Text     string                     `json:"text"`
 	Metadata map[string]json.RawMessage `json:"metadata"`
-	Data     struct {
-		Name string `json:"name"`
-	} `json:"data"`
+	Data     json.RawMessage            `json:"data"`
 }
 
 type rawMessage struct {
@@ -157,18 +156,6 @@ func isTrue(m map[string]json.RawMessage, key string) bool {
 
 func partial(m map[string]json.RawMessage) bool {
 	return isTrue(m, "kagent_adk_partial") || isTrue(m, "adk_partial")
-}
-
-func isFunctionCall(m map[string]json.RawMessage) bool {
-	for k, v := range m {
-		if strings.HasSuffix(k, "_type") {
-			var s string
-			if json.Unmarshal(v, &s) == nil && s == "function_call" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func parseEvent(b []byte) (Event, error) {
@@ -239,8 +226,12 @@ func parseEvent(b []byte) (Event, error) {
 		case "text":
 			ev.Texts = append(ev.Texts, Text{Text: p.Text, Partial: msgPartial || partial(p.Metadata)})
 		case "data":
-			if isFunctionCall(p.Metadata) {
-				ev.Tools = append(ev.Tools, p.Data.Name)
+			call, res := ParseDataPart(p.Metadata, p.Data)
+			if call != nil {
+				ev.Calls = append(ev.Calls, *call)
+			}
+			if res != nil {
+				ev.Results = append(ev.Results, *res)
 			}
 		}
 	}

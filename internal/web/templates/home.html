@@ -1,42 +1,43 @@
+{{template "shell" .}}
+{{define "crumbs"}}<li aria-current="page">Clusters</li>{{end}}
 {{define "content"}}
-{{with .Session}}
-<h2>Clusters</h2>
-<p class="meta">Logged in as {{.Username}}.</p>
-{{range .Warnings}}<p class="warning">{{.}}</p>{{end}}
+{{range .SiteNotices}}<div class="banner banner-info" role="status">{{.}}</div>
 {{end}}
-{{with .Listing}}
-<p class="summary">{{range $i, $s := .Sites}}{{if $i}} · {{end}}{{$s.Site}}: {{if eq $s.Status "ok"}}{{$s.Count}}{{if eq $i 0}} clusters{{end}}{{else if eq $s.Status "error"}}{{$s.Error}}{{else}}not logged in{{end}}{{end}}</p>
-{{range .Sites}}{{if eq .Status "error"}}<p class="warning">{{.Site}}: {{.Error}}</p>{{end}}{{end}}
-{{end}}
-<form method="get" action="/home" class="filter">
-  <input name="q" value="{{.Query}}" placeholder="Filter by name or ID">
-  <button type="submit">Filter</button>
+<div class="page-head">
+  <h1>Clusters</h1><span class="count">{{.Count}}</span>
+  {{with .Session}}
+  <div class="page-actions">
+    <span>Updated {{$.UpdatedAgo}}</span>
+    <form method="post" action="/clusters/refresh">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button type="submit" class="btn">Refresh</button>
+    </form>
+  </div>
+  {{end}}
+</div>
+<form method="get" action="/home" class="search" role="search">
+  <input type="search" name="q" value="{{.Query}}" placeholder="Search clusters" aria-label="Search clusters">
+  {{with .Site}}<input type="hidden" name="site" value="{{.}}">{{end}}
+  {{if .Sites}}
+  <a class="chip" href="/home?q={{.Query}}"{{if not .Site}} aria-current="true"{{end}}>All sites</a>
+  {{range .Sites}}<a class="chip" href="/home?site={{.}}&amp;q={{$.Query}}"{{if eq . $.Site}} aria-current="true"{{end}}>{{.}}</a>
+  {{end}}
+  {{end}}
 </form>
-<table>
-  <thead><tr><th>Name</th><th>Site</th><th>ID</th><th>State</th></tr></thead>
+{{if .Rows}}
+<table class="table">
+  <thead><tr><th>Name</th><th>Site</th><th>Status</th></tr></thead>
   <tbody>
   {{range .Rows}}
   {{if .Connected}}
-  <tr><td><a href="/clusters/{{esc .Site}}/{{esc .ID}}">{{.DisplayName}}</a></td><td>{{.Site}}</td><td><code>{{.ID}}</code></td><td>{{.State}}</td></tr>
+  <tr><td><a href="/clusters/{{esc .Site}}/{{esc .ID}}">{{.DisplayName}}</a></td><td>{{.Site}}</td><td><span class="status-dot ok"></span>Active</td></tr>
   {{else}}
-  <tr class="disconnected"><td>{{.DisplayName}}</td><td>{{.Site}}</td><td><code>{{.ID}}</code></td><td>{{.State}}</td></tr>
+  <tr class="disconnected"><td>{{.DisplayName}}</td><td>{{.Site}}</td><td><span class="status-dot off"></span>Disconnected</td></tr>
   {{end}}
-  {{else}}
-  <tr><td colspan="4">No clusters.</td></tr>
   {{end}}
   </tbody>
 </table>
-{{with .Session}}
-<div class="actions">
-<form method="post" action="/clusters/refresh">
-  <input type="hidden" name="csrf" value="{{.CSRF}}">
-  <button type="submit">Refresh</button>
-</form>
-<a href="/diagnostics">Diagnostics</a>
-<form method="post" action="/logout">
-  <input type="hidden" name="csrf" value="{{.CSRF}}">
-  <button type="submit">Log out of all sites</button>
-</form>
-</div>
+{{else}}
+<p class="empty">{{if .Query}}No clusters match {{printf "\"%s\"" .Query}}{{else}}No clusters available{{end}}</p>
 {{end}}
 {{end}}

@@ -160,6 +160,12 @@ func (c *Client) doLimit(ctx context.Context, method, path string, q url.Values,
 	return nil
 }
 
+// GetJSON GETs path (already escaped) with the bearer and decodes the 2xx body
+// into out, reading at most limit bytes.
+func (c *Client) GetJSON(ctx context.Context, bearer, path string, limit int64, out any) error {
+	return c.doLimit(ctx, http.MethodGet, path, nil, bearer, nil, out, limit)
+}
+
 // Login authenticates against the site's Active Directory provider and asks
 // for a token valid for ttl.
 func (c *Client) Login(ctx context.Context, username, password string, ttl time.Duration) (Token, error) {

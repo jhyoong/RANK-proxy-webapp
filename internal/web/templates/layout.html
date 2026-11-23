@@ -1,14 +1,42 @@
-<!doctype html>
+{{/* Page shells. Each page template starts with {{template "shell" .}} (inner
+pages: navy top bar, breadcrumb, user menu) or {{template "bare" .}} (login and
+signed-out pages: no top bar, full height), then defines "content". Inner pages
+may define "crumbs" as <li> items after the brand. */}}
+{{define "head"}}<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kagent portal</title>
 <link rel="stylesheet" href="/static/style.css">
-</head>
-<body>
-<header><h1>kagent portal</h1><span class="tag">chat test</span></header>
+</head>{{end}}
+
+{{define "shell"}}{{template "head" .}}
+<body class="app">
+<header class="topbar">
+  <a class="brand" href="/home">kagent portal</a>
+  <nav aria-label="Breadcrumb"><ol class="crumbs">{{block "crumbs" .}}{{end}}</ol></nav>
+  {{with .Session}}
+  <details class="user-menu">
+    <summary><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="5.5" r="3"/><path d="M2.5 14c.8-3 3-4.5 5.5-4.5s4.7 1.5 5.5 4.5"/></svg><span class="user-name">{{.Username}}</span></summary>
+    <div class="user-menu-panel">
+      <p class="user-menu-who">Signed in as <strong>{{.Username}}</strong></p>
+      {{with $.UI.SupportEmail}}<p>Support: <a href="mailto:{{.}}">{{.}}</a></p>{{else}}<p>Need help? Contact your platform team.</p>{{end}}
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button type="submit" class="btn">Sign out</button>
+      </form>
+      <p class="user-menu-version">Version {{$.Version}}</p>
+    </div>
+  </details>
+  {{end}}
+</header>
 <main>{{template "content" .}}</main>
-<footer>version {{.Version}}</footer>
 </body>
-</html>
+</html>{{end}}
+
+{{define "bare"}}{{template "head" .}}
+<body class="bare">
+<main class="bare-main">{{template "content" .}}</main>
+</body>
+</html>{{end}}

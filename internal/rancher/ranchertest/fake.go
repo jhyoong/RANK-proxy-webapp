@@ -79,6 +79,10 @@ type Fake struct {
 	chatURL       *url.URL
 	chatCancelled int
 	chatTurns     map[string]int // contextId -> messages seen
+
+	sessionsURL     *url.URL
+	sessionsHeaders http.Header
+	tasksCalls      int
 }
 
 // Condition is a Rancher status condition. It is defined here, not imported
@@ -97,6 +101,19 @@ type FakeCluster struct {
 	ChatStatus             int             // if non-zero, the A2A POST returns this code
 	ChatSteps              []Step          // nil -> DefaultChat()
 	ChatHang               bool            // send headers, then block until the request ends
+	// Sessions are the kagent conversations served by /api/sessions*. Each new
+	// A2A contextId appends one; read and written under the Fake's mutex.
+	Sessions      []FakeSession
+	SessionStatus int // if non-zero, every /api/sessions* route returns this code
+	TasksStatus   int // if non-zero, GET api/sessions/{id}/tasks returns this code
+}
+
+// FakeSession is a kagent session (conversation). TasksJSON is the raw `data`
+// array served by GET api/sessions/{id}/tasks; empty means [].
+type FakeSession struct {
+	ID, Name, AgentID string
+	Updated           time.Time
+	TasksJSON         string
 }
 
 // Handler returns the fake's HTTP handler.
@@ -314,7 +331,10 @@ func (f *Fake) listClusters(w http.ResponseWriter, r *http.Request) {
 		end = start + size
 	}
 	data := make([]map[string]any, 0, end-start)
-	for _, c := range f.Clusters[start:end] {
+	// Index, never copy, the cluster: chat handlers write Sessions under f.mu,
+	// and copying the struct would read it unlocked.
+	for i := start; i < end; i++ {
+		c := &f.Clusters[i]
 		conds := make([]map[string]string, 0, len(c.Conditions))
 		for _, cd := range c.Conditions {
 			conds = append(conds, map[string]string{"type": cd.Type, "status": cd.Status, "reason": cd.Reason})
@@ -422,10 +442,26 @@ func (f *Fake) k8sProxy(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && len(segs) == 12 && segs[11] == "" &&
 		segs[0] == "api" && segs[1] == "v1" && segs[2] == "namespaces" && segs[4] == "services" &&
 		segs[6] == "proxy" && segs[7] == "api" && segs[8] == "a2a":
-		f.chat(w, r, cl, user)
+		f.chat(w, r, cl, user, unescape(segs[9]), unescape(segs[10]))
+	case r.Method == http.MethodGet && len(segs) == 12 &&
+		segs[0] == "api" && segs[1] == "v1" && segs[2] == "namespaces" && segs[4] == "services" &&
+		segs[6] == "proxy" && segs[7] == "api" && segs[8] == "sessions" && segs[9] == "agent":
+		f.sessionList(w, r, cl, user, unescape(segs[10]), unescape(segs[11]))
+	case r.Method == http.MethodGet && len(segs) == 11 &&
+		segs[0] == "api" && segs[1] == "v1" && segs[2] == "namespaces" && segs[4] == "services" &&
+		segs[6] == "proxy" && segs[7] == "api" && segs[8] == "sessions" && segs[10] == "tasks":
+		f.sessionTasks(w, r, cl, user, unescape(segs[9]))
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// unescape decodes one path segment, returning it unchanged if malformed.
+func unescape(s string) string {
+	if u, err := url.PathUnescape(s); err == nil {
+		return u
+	}
+	return s
 }
 
 func (f *Fake) logout(w http.ResponseWriter, r *http.Request) {
