@@ -13,6 +13,11 @@ const (
 	maxClusterPages = 50
 )
 
+// maxListBody bounds one cluster list reply. Rancher 2.12+ (SQL cache) ignores
+// limit/continue and returns every cluster in one reply, which can exceed the
+// 1 MiB default. A var so tests can lower it.
+var maxListBody int64 = 32 << 20
+
 // Condition is a Rancher cluster status condition.
 type Condition struct{ Type, Status, Reason string }
 
@@ -60,7 +65,7 @@ func (c *Client) ListClusters(ctx context.Context, bearer string) ([]Cluster, er
 				Continue string `json:"continue"`
 			} `json:"pagination"`
 		}
-		if err := c.do(ctx, http.MethodGet, clustersPath, q, bearer, nil, &resp); err != nil {
+		if err := c.doLimit(ctx, http.MethodGet, clustersPath, q, bearer, nil, &resp, maxListBody); err != nil {
 			return nil, err
 		}
 		for _, d := range resp.Data {
