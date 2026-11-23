@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -150,6 +151,9 @@ func TestList_SiteUnauthorizedOthersStillListed(t *testing.T) {
 	if s.Status != "error" || s.HTTPCode != 401 || s.Error != "token expired or revoked: log in again" {
 		t.Fatalf("site-2 = %+v", s)
 	}
+	if w := warnLines(e.logs); len(w) != 1 || !strings.Contains(w[0], `"site":"site-2"`) || !strings.Contains(w[0], `"http_code":401`) {
+		t.Fatalf("warn lines = %v", w)
+	}
 	if got, want := ids(l), []string{"site-1/c-1", "site-3/c-3"}; !eq(got, want) {
 		t.Fatalf("rows = %v", got)
 	}
@@ -181,6 +185,9 @@ func TestList_SkipsSitesNotLoggedIn(t *testing.T) {
 	}
 	if len(l.Rows) != 2 {
 		t.Fatalf("rows = %v", ids(l))
+	}
+	if w := warnLines(e.logs); len(w) != 0 {
+		t.Fatalf("skipped site must not warn: %v", w)
 	}
 }
 
@@ -222,13 +229,54 @@ func TestListing_FindAndFilter(t *testing.T) {
 }
 
 func TestList_LogHasNoToken(t *testing.T) {
-	e := setup(t, newFakes([]ranchertest.FakeCluster{cl("c-1", "one")}))
+	fs := newFakes([]ranchertest.FakeCluster{cl("c-1", "one")}, []ranchertest.FakeCluster{cl("c-2", "two")})
+	fs[1].ListStatus = 500
+	e := setup(t, fs)
 	e.svc.List(context.Background(), e.sites)
+	if len(warnLines(e.logs)) != 1 {
+		t.Fatalf("want a warn line: %s", e.logs.String())
+	}
 	out := e.logs.String()
 	if !bytes.Contains([]byte(out), []byte("clusters_list")) {
 		t.Fatalf("no event logged: %s", out)
 	}
 	if b := e.sites[0].Token.Bearer; b == "" || bytes.Contains([]byte(out), []byte(b)) {
 		t.Fatalf("bearer %q empty or leaked", b)
+	}
+}
+
+// warnLines returns the clusters_list_error log lines.
+func warnLines(logs *syncBuf) []string {
+	var out []string
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if strings.Contains(line, `"event":"clusters_list_error"`) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func TestList_BadResponseWarnsWithCode(t *testing.T) {
+	fs := newFakes(
+		[]ranchertest.FakeCluster{cl("c-1", "one")},
+		[]ranchertest.FakeCluster{cl("c-2", "two")})
+	fs[0].ListStatus = 200
+	fs[0].ListBody = "<html>not json</html>"
+	e := setup(t, fs)
+	l := e.svc.List(context.Background(), e.sites)
+	if s := l.Sites[0]; s.Status != "error" || s.HTTPCode != 200 {
+		t.Fatalf("site-1 = %+v", s)
+	}
+	if got, want := ids(l), []string{"site-2/c-2"}; !eq(got, want) {
+		t.Fatalf("rows = %v", got)
+	}
+	warns := warnLines(e.logs)
+	if len(warns) != 1 {
+		t.Fatalf("warn lines = %v", warns)
+	}
+	for _, want := range []string{`"level":"WARN"`, `"site":"site-1"`, `"http_code":200`, `"error":"unexpected response from Rancher`} {
+		if !strings.Contains(warns[0], want) {
+			t.Fatalf("missing %s in %s", want, warns[0])
+		}
 	}
 }

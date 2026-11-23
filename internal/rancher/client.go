@@ -51,6 +51,10 @@ type User struct {
 // use (not JSON, wrong shape, or no token).
 var ErrBadResponse = errors.New("unexpected response from Rancher")
 
+// ErrBodyTooLarge means a 2xx body was larger than the call's limit. It is
+// always also an ErrBadResponse.
+var ErrBodyTooLarge = errors.New("response too large")
+
 // StatusError is a non-2xx response from Rancher.
 type StatusError struct {
 	Code int
@@ -62,12 +66,15 @@ func (e *StatusError) Error() string { return fmt.Sprintf("rancher returned HTTP
 // BadResponseError is ErrBadResponse for a 2xx body that failed to decode; it
 // carries the HTTP status so callers can report it.
 type BadResponseError struct {
-	Code int
-	msg  string
+	Code     int
+	msg      string
+	tooLarge bool // body exceeded the call's limit; also matches ErrBodyTooLarge
 }
 
-func (e *BadResponseError) Error() string        { return ErrBadResponse.Error() + ": " + e.msg }
-func (e *BadResponseError) Is(target error) bool { return target == ErrBadResponse }
+func (e *BadResponseError) Error() string { return ErrBadResponse.Error() + ": " + e.msg }
+func (e *BadResponseError) Is(target error) bool {
+	return target == ErrBadResponse || (e.tooLarge && target == ErrBodyTooLarge)
+}
 
 // NewClient builds a client for site. timeout bounds each request.
 func NewClient(site config.Site, timeout time.Duration) (*Client, error) {
@@ -97,6 +104,11 @@ func NewClient(site config.Site, timeout time.Duration) (*Client, error) {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, bearer string, body any, out any) error {
+	return c.doLimit(ctx, method, path, q, bearer, body, out, maxBody)
+}
+
+// doLimit is do with a per-call limit on the 2xx body decoded into out.
+func (c *Client) doLimit(ctx context.Context, method, path string, q url.Values, bearer string, body any, out any, limit int64) error {
 	u := c.base + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
@@ -134,7 +146,15 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, bear
 		_, _ = io.Copy(io.Discard, lr)
 		return nil
 	}
-	if err := json.NewDecoder(lr).Decode(out); err != nil {
+	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		// e.g. the connection was cut mid-body: keep the status for callers.
+		return &BadResponseError{Code: resp.StatusCode, msg: fmt.Sprintf("read %s: %v", path, err)}
+	}
+	if int64(len(b)) > limit {
+		return &BadResponseError{Code: resp.StatusCode, tooLarge: true, msg: fmt.Sprintf("response from %s exceeds %d bytes", path, limit)}
+	}
+	if err := json.Unmarshal(b, out); err != nil {
 		return &BadResponseError{Code: resp.StatusCode, msg: fmt.Sprintf("decode %s: %v", path, err)}
 	}
 	return nil

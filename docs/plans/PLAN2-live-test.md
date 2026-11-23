@@ -19,15 +19,15 @@ Log in first. Latencies and the per-site list status are on `/diagnostics`.
 
 | ID | Do this | Expected | Record |
 | --- | --- | --- | --- |
-| L1 | Log in, open `/home` | Clusters from all 3 sites. The summary counts match each site's cluster count in the Rancher UI, minus `local` | Counts per site, plus list ms per site (from `/diagnostics`) |
+| L1 | Log in, open `/home` | Clusters from all 3 sites. The summary counts match each site's cluster count in the Rancher UI, minus `local` (unless `clusters.include_local: true`, then including it) | Counts per site, plus list ms per site (from `/diagnostics`) |
 | L2 | Find a cluster the Rancher UI shows as disconnected (if any) | Greyed out, no link | Pass/skip. If wrong, that row's raw state and conditions from `/diagnostics` |
 | L3 | Click a cluster known to run kagent | `kagent is ready`, the agent name, streaming yes/no | Card name, streaming, SSAR ms, card ms |
 | L4 | Click a cluster without kagent, or with kagent down (if any) | `kagent or the agent isn't installed on this cluster` (`not-installed`) or `kagent is installed but not running` (`not-running`) | The outcome text and card code |
 | L5 | Click Refresh | The list reloads (`event=clusters_list` in the logs) | Pass/fail |
 | L6 | Type part of a cluster name in the filter | Only matching rows | Pass/fail |
 | L7 | Optional: a non-admin colleague opens a cluster they can see but have no kagent role on | `You don't have kagent access on this cluster` | Pass/skip |
-| L8 | Search the list for `local` | No cluster is named exactly `local` (a name that merely contains "local" is fine) | Pass/fail |
-| L9 | Edit the URL to `/clusters/<site>/local` | 404 | Pass/fail |
+| L8 | Search the list for `local`. Skip if `clusters.include_local: true` | No cluster is named exactly `local` (a name that merely contains "local" is fine) | Pass/fail |
+| L9 | Edit the URL to `/clusters/<site>/local`. Skip if `clusters.include_local: true` | 404 | Pass/fail |
 
 L7 is optional because you have access to everything, so it needs a colleague with a narrower role.
 
@@ -55,7 +55,7 @@ other: none
 | Field | What to write |
 | --- | --- |
 | L1 to L9 | `pass`, `fail` or `skip`, plus the extra fields shown |
-| L1 `count` | The cluster count per site from the `/home` summary line, in site order. If it differs from the Rancher UI count minus `local`, write `fail` and both numbers, e.g. `s2 portal=37 ui=39`. |
+| L1 `count` | The cluster count per site from the `/home` summary line, in site order. If it differs from the Rancher UI count minus `local` (unless `clusters.include_local: true`, then including it), write `fail` and both numbers, e.g. `s2 portal=37 ui=39`. |
 | L1 `ms` | The list latency per site from `/diagnostics` |
 | L3 `agent` | The agent name shown on the result. Write `xx` if it is sensitive. |
 | L3 `streaming` | `y` or `n`. The page shows `true` or `false`; record it as `y` or `n`. |

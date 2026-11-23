@@ -3,6 +3,7 @@ package rancher_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +167,84 @@ func TestListClusters_BadJSON(t *testing.T) {
 	if !errors.Is(err, rancher.ErrBadResponse) {
 		t.Fatalf("want ErrBadResponse, got %v", err)
 	}
+	if errors.Is(err, rancher.ErrBodyTooLarge) {
+		t.Fatalf("short body must not be reported as too large: %v", err)
+	}
+}
+
+// The live-test runbook tells a cut reply apart from the size limit by this text.
+func TestListClusters_TruncatedBodyMessage(t *testing.T) {
+	f := newFake()
+	f.ListStatus = 200
+	f.ListBody = `{"data":[{"id":"c-1"`
+	c, bearer := listSetup(t, f)
+	_, err := c.ListClusters(context.Background(), bearer)
+	if err == nil || errors.Is(err, rancher.ErrBodyTooLarge) || !strings.Contains(err.Error(), "decode /v1/management.cattle.io.clusters: unexpected end of JSON input") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestListClusters_LargePage(t *testing.T) {
+	f := newFake()
+	long := strings.Repeat("x", 1024)
+	f.IgnoreLimit = true
+	for i := range 1500 { // ~1.6 MiB in one page
+		f.Clusters = append(f.Clusters, ranchertest.FakeCluster{ID: fmt.Sprintf("c-%04d", i), DisplayName: long, State: "active"})
+	}
+	c, bearer := listSetup(t, f)
+	got, err := c.ListClusters(context.Background(), bearer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1500 {
+		t.Fatalf("got %d clusters", len(got))
+	}
+}
+
+func TestListClusters_BodyTooLarge(t *testing.T) {
+	rancher.SetMaxListBody(t, 4096)
+	f := newFake()
+	f.IgnoreLimit = true
+	long := strings.Repeat("x", 1024)
+	for i := range 20 {
+		f.Clusters = append(f.Clusters, ranchertest.FakeCluster{ID: fmt.Sprintf("c-%d", i), DisplayName: long, State: "active"})
+	}
+	c, bearer := listSetup(t, f)
+	_, err := c.ListClusters(context.Background(), bearer)
+	if !errors.Is(err, rancher.ErrBodyTooLarge) || !errors.Is(err, rancher.ErrBadResponse) {
+		t.Fatalf("got %v", err)
+	}
+	var be *rancher.BadResponseError
+	if !errors.As(err, &be) || be.Code != 200 {
+		t.Fatalf("code: %v", err)
+	}
+	if want := "response from /v1/management.cattle.io.clusters exceeds 4096 bytes"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("msg %q", err)
+	}
+}
+
+func TestDo_BodyLimitBoundary(t *testing.T) {
+	body := `{"data":[{"id":"c-1"}]}` + strings.Repeat(" ", 100)
+	for _, tc := range []struct {
+		limit  int64
+		tooBig bool
+	}{{int64(len(body)), false}, {int64(len(body)) - 1, true}} {
+		rancher.SetMaxListBody(t, tc.limit)
+		f := newFake()
+		f.ListStatus = 200
+		f.ListBody = body
+		c, bearer := listSetup(t, f)
+		got, err := c.ListClusters(context.Background(), bearer)
+		if tc.tooBig {
+			if !errors.Is(err, rancher.ErrBodyTooLarge) {
+				t.Fatalf("limit %d: want ErrBodyTooLarge, got %v", tc.limit, err)
+			}
+			continue
+		}
+		if err != nil || len(got) != 1 {
+			t.Fatalf("limit %d: got %v, %v", tc.limit, got, err)
+		}
+	}
 }
 
 var kagentAttrs = rancher.AccessAttrs{
@@ -274,6 +353,18 @@ func TestAgentCard_BadJSON(t *testing.T) {
 	_, err := c.AgentCard(context.Background(), bearer, "c-abc12", "kagent", "svc", "kagent", "a")
 	if !errors.Is(err, rancher.ErrBadResponse) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAgentCard_OverOneMiB(t *testing.T) {
+	f := newFake()
+	card := `{"name":"a","capabilities":{"streaming":true}}`
+	card += strings.Repeat(" ", 1<<20+1-len(card))
+	f.Clusters = []ranchertest.FakeCluster{{ID: "c-abc12", State: "active", CardBody: card}}
+	c, bearer := accessSetup(t, f)
+	_, err := c.AgentCard(context.Background(), bearer, "c-abc12", "kagent", "svc", "kagent", "a")
+	if !errors.Is(err, rancher.ErrBodyTooLarge) {
+		t.Fatalf("want ErrBodyTooLarge, got %v", err)
 	}
 }
 

@@ -79,14 +79,19 @@ func (s *Service) List(ctx context.Context, sites []auth.SiteResult) *Listing {
 			if err != nil {
 				sl.Status = "error"
 				var se *rancher.StatusError
-				if errors.As(err, &se) {
+				var be *rancher.BadResponseError
+				switch {
+				case errors.As(err, &se):
 					sl.HTTPCode = se.Code
 					if se.Code == 401 {
 						sl.Error = "token expired or revoked: log in again"
 					} else {
 						sl.Error = fmt.Sprintf("HTTP %d from Rancher", se.Code)
 					}
-				} else {
+				case errors.As(err, &be):
+					sl.HTTPCode = be.Code
+					sl.Error = auth.ShortErr(err)
+				default:
 					sl.Error = auth.ShortErr(err)
 				}
 			} else {
@@ -127,6 +132,13 @@ func (s *Service) List(ctx context.Context, sites []auth.SiteResult) *Listing {
 		ls[i] = logSite{sl.Site, sl.Status, sl.HTTPCode, sl.Count, sl.Latency.Milliseconds()}
 	}
 	s.log.Info("clusters", "event", "clusters_list", "sites", ls)
+	// One WARN per failed site, after Wait so the order is config order.
+	for _, sl := range l.Sites {
+		if sl.Status == "error" {
+			s.log.Warn("clusters", "event", "clusters_list_error", "site", sl.Site,
+				"http_code", sl.HTTPCode, "ms", sl.Latency.Milliseconds(), "error", sl.Error)
+		}
+	}
 	return l
 }
 

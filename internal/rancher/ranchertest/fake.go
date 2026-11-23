@@ -53,6 +53,9 @@ type Fake struct {
 	ListBody   string        // body sent with ListStatus
 	PageSize   int           // if >0, the cluster list paginates with this many items per page
 	LoopPages  bool          // if true, every list page returns a continue token
+	// IgnoreLimit makes the list ignore the limit parameter, as Rancher 2.12+
+	// does with its SQL cache on: every cluster comes back in one reply.
+	IgnoreLimit bool
 	// TopLevelContinue emits the continue token at the top level of the
 	// collection (as rancher/apiserver does) instead of under pagination.
 	TopLevelContinue bool
@@ -295,7 +298,7 @@ func (f *Fake) listClusters(w http.ResponseWriter, r *http.Request) {
 		start = n
 	}
 	size := f.PageSize
-	if l, err := strconv.Atoi(q.Get("limit")); err == nil && l > 0 && (size == 0 || l < size) {
+	if l, err := strconv.Atoi(q.Get("limit")); !f.IgnoreLimit && err == nil && l > 0 && (size == 0 || l < size) {
 		size = l
 	}
 	end := len(f.Clusters)
