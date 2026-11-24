@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -90,7 +91,7 @@ func (r *recorder) all() []chat.Out {
 func (e env) send(t *testing.T, ctx context.Context, text, contextID string) []chat.Out {
 	t.Helper()
 	var r recorder
-	e.svc.Send(ctx, e.sites, e.row, principal, text, contextID, r.emit)
+	e.svc.Send(ctx, e.sites, e.row, principal, text, contextID, nil, r.emit)
 	return r.all()
 }
 
@@ -351,6 +352,107 @@ func TestSend_InputRequired(t *testing.T) {
 	wantRunning(t, outs, false)
 }
 
+func TestSend_InputRequiredAsk(t *testing.T) {
+	e := setup(t, ranchertest.FakeCluster{}, baseCfg())
+	outs := e.send(t, context.Background(), "please ask me something", a2a.NewUUID())
+	if errs := errorsOf(outs); len(errs) != 0 {
+		t.Fatalf("errors = %q", errs)
+	}
+	var asks []chat.Ask
+	for _, o := range outs {
+		if o.Type == "ask" {
+			asks = append(asks, o.Data.(chat.Ask))
+		}
+		if tl, ok := o.Data.(chat.Tool); ok && tl.Name != "ask_user" {
+			t.Fatalf("internal tool shown: %+v", tl)
+		}
+		if tr, ok := o.Data.(chat.ToolResult); ok {
+			t.Fatalf("pending stub shown: %+v", tr)
+		}
+	}
+	if len(asks) != 1 || !strings.HasPrefix(asks[0].TaskID, "task-") || asks[0].ID != "adk-conf-1" ||
+		len(asks[0].Questions) != 2 || !asks[0].Questions[1].Multiple {
+		t.Fatalf("asks = %+v; outs = %v", asks, types(outs))
+	}
+	if d := checkDone(t, outs); d.State != "input-required" || d.TaskID != asks[0].TaskID {
+		t.Fatalf("done = %+v", d)
+	}
+	wantResult(t, e.logs.String(), "input-required")
+}
+
+func TestSend_AskDeduplicated(t *testing.T) {
+	ask := `{"jsonrpc":"2.0","id":"1","result":{"kind":"status-update","taskId":"t1","contextId":"c","final":%s,` +
+		`"status":{"state":"%s","message":{"kind":"message","role":"agent","parts":[` + ranchertest.AskConfirmation + `]}}}}`
+	e := setup(t, ranchertest.FakeCluster{ChatSteps: []ranchertest.Step{
+		step(submitted), step(fmt.Sprintf(ask, "false", "working")), step(fmt.Sprintf(ask, "true", "input-required")),
+	}}, baseCfg())
+	outs := e.send(t, context.Background(), "hi", a2a.NewUUID())
+	n := 0
+	for _, o := range outs {
+		if o.Type == "ask" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("asks = %d; outs = %v", n, types(outs))
+	}
+}
+
+func TestSend_Resume(t *testing.T) {
+	e := setup(t, ranchertest.FakeCluster{}, baseCfg())
+	ctxID := a2a.NewUUID()
+	first := e.send(t, context.Background(), "ask me", ctxID)
+	task := checkDone(t, first).TaskID
+	var r recorder
+	e.svc.Send(context.Background(), e.sites, e.row, principal, "", ctxID,
+		&chat.Resume{TaskID: task, Answers: [][]string{{"default"}, {"pods", "services"}}}, r.emit)
+	outs := r.all()
+	if errs := errorsOf(outs); len(errs) != 0 {
+		t.Fatalf("errors = %q", errs)
+	}
+	if d := checkDone(t, outs); d.State != "completed" || d.TaskID != task {
+		t.Fatalf("done = %+v", d)
+	}
+	msg := e.f.LastChatBody()["params"].(map[string]any)["message"].(map[string]any)
+	if msg["taskId"] != task || msg["contextId"] != ctxID {
+		t.Fatalf("message = %v", msg)
+	}
+	var answer string
+	for _, o := range outs {
+		if o.Type == "answer" || o.Type == "progress" {
+			if a, ok := o.Data.(chat.Answer); ok {
+				answer = a.Text
+			}
+			if p, ok := o.Data.(chat.Progress); ok {
+				answer = p.Text
+			}
+		}
+		if o.Type == "tool_result" && o.Data.(chat.ToolResult).Name != "ask_user" {
+			t.Fatalf("unexpected result %+v", o.Data)
+		}
+	}
+	if answer != "Thanks, you chose [[default] [pods services]]." {
+		t.Fatalf("answer = %q; outs = %v", answer, types(outs))
+	}
+}
+
+func TestSend_Skip(t *testing.T) {
+	e := setup(t, ranchertest.FakeCluster{}, baseCfg())
+	ctxID := a2a.NewUUID()
+	task := checkDone(t, e.send(t, context.Background(), "ask me", ctxID)).TaskID
+	var r recorder
+	e.svc.Send(context.Background(), e.sites, e.row, principal, "", ctxID, &chat.Resume{TaskID: task, Skip: true}, r.emit)
+	outs := r.all()
+	if d := checkDone(t, outs); d.State != "completed" || len(errorsOf(outs)) != 0 {
+		t.Fatalf("outs = %v", types(outs))
+	}
+	msg := e.f.LastChatBody()["params"].(map[string]any)["message"].(map[string]any)
+	data := msg["parts"].([]any)[0].(map[string]any)["data"].(map[string]any)
+	if msg["taskId"] != task || data["decision_type"] != "reject" {
+		t.Fatalf("message = %v", msg)
+	}
+}
+
 func TestSend_EOFWithoutFinal(t *testing.T) {
 	e := setup(t, ranchertest.FakeCluster{ChatSteps: ranchertest.DefaultChat()[:2]}, baseCfg())
 	outs := e.send(t, context.Background(), "hi", a2a.NewUUID())
@@ -467,7 +569,7 @@ func TestSend_CancelStopsUpstream(t *testing.T) {
 		cancel() // after the first event
 	}
 	start := time.Now()
-	e.svc.Send(ctx, e.sites, e.row, principal, "hi", a2a.NewUUID(), emit)
+	e.svc.Send(ctx, e.sites, e.row, principal, "hi", a2a.NewUUID(), nil, emit)
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("took %v", d)
 	}

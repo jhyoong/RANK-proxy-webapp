@@ -32,6 +32,8 @@
   var polling = false;      // following a running turn through its transcript
   var unconfirmed = false;  // following a new conversation kagent may never have created
   var pollFails = 0, lastBody = null;
+  var asking = null;        // {card, taskId}: the ask_user question awaiting an answer
+  var placeholder = msg.getAttribute('placeholder') || '';
 
   // ---------- Renderer ----------
 
@@ -128,6 +130,109 @@
     log.replaceChildren();
     tools = Object.create(null);
     open = last = null;
+    asking = null;
+  }
+
+  // ---------- Questions (kagent's ask_user tool) ----------
+
+  function askCard(q) {
+    var card = el('section', 'ask');
+    card.setAttribute('aria-label', 'Questions from the agent');
+    var head = card.appendChild(el('p', 'ask-title', 'Questions for you'));
+    if (q.subagent) head.appendChild(el('span', 'muted', ' · via ' + q.subagent));
+    return card;
+  }
+
+  // addAnswered draws an answered (or skipped) question set, read-only.
+  function addAnswered(q) {
+    var card = askCard(q);
+    card.classList.add('answered');
+    if (q.skipped) card.classList.add('skipped');
+    card.firstChild.appendChild(el('span', 'ask-badge', q.skipped ? 'Skipped' : 'Answered'));
+    (q.questions || []).forEach(function (qu, i) {
+      var b = card.appendChild(el('div', 'ask-q'));
+      b.appendChild(el('p', 'ask-question', qu.question || 'Question ' + (i + 1)));
+      if (q.skipped) return;
+      var ans = (q.answers && q.answers[i]) || [];
+      b.appendChild(el('p', 'ask-answer', ans.length ? ans.join(', ') : '(no answer)'));
+    });
+    return append(card);
+  }
+
+  // addAsk draws a question set the user can answer: choice buttons (one or
+  // many, per question) plus free text. Submit sends one answer list per
+  // question, in order, to resume the paused task; Skip declines them all.
+  function addAsk(q) {
+    var card = askCard(q);
+    var qs = q.questions || [];
+    var picks = qs.map(function () { return []; });
+    var texts = [];
+    var submit = el('button', 'btn btn-primary', 'Submit answers');
+    submit.type = 'button';
+    var skip = el('button', 'btn', 'Skip');
+    skip.type = 'button';
+    skip.title = 'Let the agent continue without answers';
+    function answers() {
+      return qs.map(function (qu, i) {
+        var a = picks[i].slice();
+        var t = texts[i].value.trim();
+        if (t) a.push(t);
+        return a;
+      });
+    }
+    function update() {
+      skip.disabled = !!ctrl || polling || locked;
+      submit.disabled = skip.disabled || !answers().every(function (a) { return a.length > 0; });
+    }
+    qs.forEach(function (qu, i) {
+      var fs = card.appendChild(el('fieldset', 'ask-q'));
+      fs.appendChild(el('legend', 'ask-question', qu.question || 'Question ' + (i + 1)));
+      var choices = qu.choices || [];
+      if (choices.length) {
+        var row = fs.appendChild(el('div', 'ask-choices'));
+        if (qu.multiple) fs.appendChild(el('p', 'muted ask-hint', 'Choose any that apply'));
+        var btns = choices.map(function (c) {
+          var b = row.appendChild(el('button', 'ask-choice', c));
+          b.type = 'button';
+          b.setAttribute('aria-pressed', 'false');
+          b.addEventListener('click', function () {
+            var at = picks[i].indexOf(c);
+            if (at >= 0) picks[i].splice(at, 1);
+            else if (qu.multiple) picks[i].push(c);
+            else picks[i] = [c];
+            btns.forEach(function (o, j) { o.setAttribute('aria-pressed', picks[i].indexOf(choices[j]) >= 0 ? 'true' : 'false'); });
+            update();
+          });
+          return b;
+        });
+      }
+      var t = fs.appendChild(el('input', 'ask-text'));
+      t.type = 'text';
+      t.placeholder = choices.length ? 'Or type your own answer' : 'Your answer';
+      t.setAttribute('aria-label', (qu.question || 'Question ' + (i + 1)) + ': your answer');
+      t.addEventListener('input', update);
+      t.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+          e.preventDefault();
+          if (!submit.disabled) submit.click();
+        }
+      });
+      texts.push(t);
+    });
+    var actions = card.appendChild(el('div', 'ask-actions'));
+    actions.appendChild(skip);
+    actions.appendChild(submit);
+    submit.addEventListener('click', function () {
+      update();
+      if (!submit.disabled) answer(q, answers());
+    });
+    skip.addEventListener('click', function () {
+      update();
+      if (!skip.disabled) answer(q, null);
+    });
+    update();
+    asking = { card: append(card), taskId: q.task_id, update: update };
+    return asking;
   }
 
   // ---------- Composer ----------
@@ -137,6 +242,18 @@
     msg.disabled = sendBtn.disabled = state !== 'idle';
     sendBtn.hidden = state === 'streaming';
     stopBtn.hidden = state !== 'streaming';
+    msg.placeholder = asking ? 'Answer the questions above to continue' : placeholder;
+    if (asking) asking.update();
+  }
+
+  // ready gives the composer back, unless the agent is waiting for answers:
+  // then only the question card takes input, as in kagent's own UI. focus
+  // moves the focus there, after a live reply.
+  function ready(focus) {
+    composer(asking ? 'disabled' : 'idle');
+    if (!focus) return;
+    var f = asking ? asking.card.querySelector('button.ask-choice, input') : msg;
+    if (f) f.focus();
   }
 
   function updateCount() {
@@ -158,7 +275,7 @@
   // ---------- Live reply ----------
 
   // UPSTREAM are the events that show kagent accepted the message.
-  var UPSTREAM = { state: 1, progress: 1, tool: 1, tool_result: 1, answer: 1 };
+  var UPSTREAM = { state: 1, progress: 1, tool: 1, tool_result: 1, answer: 1, ask: 1 };
 
   function onEvent(type, d) {
     if (!started && UPSTREAM[type] === 1) {
@@ -197,6 +314,10 @@
         if (last && lastText === d.text) last.remove();
         open = last = null;
         setAgentText(agentBubble(), d.text);
+        break;
+      case 'ask':
+        open = last = null;
+        addAsk(d);
         break;
       case 'error':
         errored = true;
@@ -285,13 +406,38 @@
 
   async function send() {
     var text = msg.value.trim();
-    if (!text || ctrl || locked || polling) return;
+    if (!text || ctrl || locked || polling || asking) return;
     addUser(text);
     msg.value = '';
     updateCount();
+    pending = text;
+    await run({ text: text, context_id: contextId }, function () {
+      msg.value = text;
+      updateCount();
+    });
+  }
+
+  // answer sends the answers to the question set q (null skips it), which
+  // then shows them read-only. If the portal refuses, the question comes back.
+  async function answer(q, answers) {
+    if (ctrl || locked || polling || !asking) return;
+    asking.card.remove();
+    asking = null;
+    var card = addAnswered({ questions: q.questions, answers: answers, skipped: !answers, subagent: q.subagent });
+    var body = { context_id: contextId, task_id: q.task_id };
+    if (answers) body.answers = answers;
+    else body.skip = true;
+    await run(body, function () {
+      card.remove();
+      addAsk(q);
+    });
+  }
+
+  // run posts body to the portal and renders the streamed reply. restore runs
+  // if the portal refuses the request.
+  async function run(body, restore) {
     open = last = null;
     errored = gotDone = started = mayRun = false;
-    pending = text;
     ctrl = new AbortController();
     var signal = ctrl.signal;
     var follow = false;  // kagent may still be running the turn
@@ -300,11 +446,10 @@
       var resp = await fetch(chatUrl, {
         method: 'POST', credentials: 'same-origin', signal: signal,
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
-        body: JSON.stringify({ text: text, context_id: contextId })
+        body: JSON.stringify(body)
       });
       if (resp.status !== 200) {
-        msg.value = text;
-        updateCount();
+        restore();
         httpError(resp.status);
         return;
       }
@@ -332,8 +477,7 @@
       } else if (follow) {
         followTurn();
       } else {
-        composer('idle');
-        msg.focus();
+        ready(true);
       }
     }
   }
@@ -359,7 +503,7 @@
   function stopFollowing() {
     polling = unconfirmed = false;
     transcriptUrl = '';
-    composer('idle');
+    ready();
   }
 
   // ---------- Replay ----------
@@ -384,9 +528,12 @@
           if (it.id && opened[it.id]) rec.el.open = true;
         } else if (it.kind === 'notice') {
           addNotice(it.text);
+        } else if (it.kind === 'ask') {
+          addAnswered(it);
         }
       });
     });
+    if (tr.pending) addAsk(tr.pending);
     if (tr.running) addNotice('kagent is still working on this reply…', 'working');
     log.scrollTop = atBottom ? log.scrollHeight : top;
     setTimeout(function () { log.removeAttribute('aria-busy'); }, 0);
@@ -397,7 +544,7 @@
     for (var i = 0; i < stale.length; i++) stale[i].remove();
     var n = addNotice("Couldn't load conversation history. ");
     n.appendChild(link(location.href, 'Retry'));
-    composer('idle');
+    ready();
   }
 
   // pollFailed retries a failed poll of a running turn a few times before
@@ -454,7 +601,7 @@
       composer('disabled');
       setTimeout(loadTranscript, POLL_MS);
     } else {
-      composer('idle');
+      ready();
     }
   }
 

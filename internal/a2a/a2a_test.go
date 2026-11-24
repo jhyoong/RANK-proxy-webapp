@@ -3,6 +3,7 @@ package a2a_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,6 +89,80 @@ func TestStreamRequest(t *testing.T) {
 	_ = json.Unmarshal(b2, &r2)
 	if r2.Params.Message.MessageID == m.MessageID {
 		t.Fatal("messageId must differ between calls")
+	}
+}
+
+func TestResumeRequest(t *testing.T) {
+	ctxID := a2a.NewUUID()
+	b, err := json.Marshal(a2a.ResumeRequest(ctxID, "T1", [][]string{{"prod"}, {"free text", "chip"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Method string `json:"method"`
+		ID     string `json:"id"`
+		Params struct {
+			Message struct {
+				Kind      string `json:"kind"`
+				MessageID string `json:"messageId"`
+				ContextID string `json:"contextId"`
+				TaskID    string `json:"taskId"`
+				Role      string `json:"role"`
+				Parts     []struct {
+					Kind     string         `json:"kind"`
+					Text     string         `json:"text"`
+					Data     map[string]any `json:"data"`
+					Metadata map[string]any `json:"metadata"`
+				} `json:"parts"`
+			} `json:"message"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatal(err)
+	}
+	m := r.Params.Message
+	if r.Method != "message/stream" || m.Kind != "message" || m.Role != "user" || m.ContextID != ctxID || m.TaskID != "T1" ||
+		!a2a.ValidUUID(r.ID) || !a2a.ValidUUID(m.MessageID) || len(m.Parts) != 2 {
+		t.Fatalf("body = %s", b)
+	}
+	d := m.Parts[0]
+	if d.Kind != "data" || len(d.Metadata) != 0 || d.Data["decision_type"] != "approve" {
+		t.Fatalf("data part = %s", b)
+	}
+	ans, _ := json.Marshal(d.Data["ask_user_answers"])
+	if string(ans) != `[{"answer":["prod"]},{"answer":["free text","chip"]}]` {
+		t.Fatalf("answers = %s", ans)
+	}
+	if m.Parts[1].Kind != "text" || m.Parts[1].Text != "Answered questions" {
+		t.Fatalf("text part = %s", b)
+	}
+	// A nil answer list is sent as [], never null.
+	b, _ = json.Marshal(a2a.ResumeRequest(ctxID, "T1", [][]string{nil}))
+	if !strings.Contains(string(b), `[{"answer":[]}]`) {
+		t.Fatalf("body = %s", b)
+	}
+}
+
+func TestSkipRequest(t *testing.T) {
+	b, _ := json.Marshal(a2a.SkipRequest("c1", "T1"))
+	var r struct {
+		Params struct {
+			Message struct {
+				TaskID    string `json:"taskId"`
+				ContextID string `json:"contextId"`
+				Parts     []struct {
+					Kind string         `json:"kind"`
+					Text string         `json:"text"`
+					Data map[string]any `json:"data"`
+				} `json:"parts"`
+			} `json:"message"`
+		} `json:"params"`
+	}
+	_ = json.Unmarshal(b, &r)
+	m := r.Params.Message
+	if m.TaskID != "T1" || m.ContextID != "c1" || len(m.Parts) != 2 || m.Parts[0].Data["decision_type"] != "reject" ||
+		m.Parts[0].Data["ask_user_answers"] != nil || m.Parts[0].Data["rejection_reason"] == "" || m.Parts[1].Text != "Skipped questions" {
+		t.Fatalf("body = %s", b)
 	}
 }
 

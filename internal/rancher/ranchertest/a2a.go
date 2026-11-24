@@ -45,6 +45,61 @@ func DefaultChat() []Step {
 	}
 }
 
+// AskTrigger in a user message makes the fake agent pause on an ask_user
+// question (AskChat) instead of running its script.
+const AskTrigger = "ask me"
+
+// AskConfirmation is the long-running adk_request_confirmation data part that
+// kagent's Python ADK sends when the ask_user tool pauses a task.
+const AskConfirmation = `{"kind":"data","metadata":{"kagent_type":"function_call","kagent_is_long_running":true},` +
+	`"data":{"name":"adk_request_confirmation","id":"adk-conf-1","args":{` +
+	`"originalFunctionCall":{"name":"ask_user","id":"call_ask","args":{"questions":[` +
+	`{"question":"Which namespace should I check?","choices":["default","kube-system"],"multiple":false},` +
+	`{"question":"Which resources?","choices":["pods","deployments","services"],"multiple":true}]}},` +
+	`"toolConfirmation":{"hint":"Which namespace should I check?; Which resources?","confirmed":false,"payload":null}}}}`
+
+// AskChat returns the script of a turn that pauses on an ask_user question:
+// submitted, working, the ask_user call and its pending stub, then a final
+// input-required status carrying AskConfirmation. "{{task}}" is the task ID.
+func AskChat() []Step {
+	const d = 20 * time.Millisecond
+	upd := func(final, state, parts string) string {
+		return `{"jsonrpc":"2.0","id":"1","result":{"kind":"status-update","taskId":"{{task}}","contextId":"c","final":` + final +
+			`,"status":{"state":"` + state + `","message":{"kind":"message","messageId":"m","role":"agent","parts":[` + parts + `]}}}}`
+	}
+	return []Step{
+		{Delay: d, Data: `{"jsonrpc":"2.0","id":"1","result":{"kind":"status-update","taskId":"{{task}}","contextId":"c","final":false,` +
+			`"status":{"state":"submitted","message":{"kind":"message","messageId":"u","role":"user","parts":[{"kind":"text","text":"{{text}}"}]}}}}`},
+		{Delay: d, Data: upd("false", "working", `{"kind":"text","text":"I need a little more detail first."}`)},
+		{Delay: d, Data: upd("false", "working", `{"kind":"data","metadata":{"kagent_type":"function_call"},`+
+			`"data":{"id":"call_ask","name":"ask_user","args":{"questions":[{"question":"Which namespace should I check?"}]}}}`)},
+		{Delay: d, Data: upd("false", "working", `{"kind":"data","metadata":{"kagent_type":"function_response"},`+
+			`"data":{"id":"call_ask","name":"ask_user","response":{"status":"pending","questions":[]}}}`)},
+		{Delay: d, Data: upd("true", "input-required", AskConfirmation)},
+	}
+}
+
+// ResumeChat returns the script of a resumed ask_user task: the decision
+// echo, the ask_user result, an answer quoting the answers ("{{text}}"), and
+// completed. "{{task}}" is the task ID.
+func ResumeChat() []Step {
+	const d = 20 * time.Millisecond
+	upd := func(parts string) string {
+		return `{"jsonrpc":"2.0","id":"1","result":{"kind":"status-update","taskId":"{{task}}","contextId":"c","final":false,` +
+			`"status":{"state":"working","message":{"kind":"message","messageId":"m","role":"agent","parts":[` + parts + `]}}}}`
+	}
+	return []Step{
+		{Delay: d, Data: `{"jsonrpc":"2.0","id":"1","result":{"kind":"status-update","taskId":"{{task}}","contextId":"c","final":false,` +
+			`"status":{"state":"working","message":{"kind":"message","messageId":"u","role":"user","parts":[` +
+			`{"kind":"data","data":{"decision_type":"approve"}},{"kind":"text","text":"Answered questions"}]}}}}`},
+		{Delay: d, Data: upd(`{"kind":"data","metadata":{"kagent_type":"function_response"},` +
+			`"data":{"id":"call_ask","name":"ask_user","response":{"result":"answered"}}}`)},
+		{Delay: d, Data: upd(`{"kind":"text","text":"Thanks, you chose {{text}}."}`)},
+		{Delay: d, Data: `{"jsonrpc":"2.0","id":"1","result":{"kind":"status-update","taskId":"{{task}}","contextId":"c","final":true,` +
+			`"status":{"state":"completed"}}}`},
+	}
+}
+
 // ChatCalls returns how many A2A POSTs reached a known cluster.
 func (f *Fake) ChatCalls() int {
 	f.mu.Lock()
@@ -102,18 +157,31 @@ func (f *Fake) chat(w http.ResponseWriter, r *http.Request, cl *FakeCluster, use
 		http.Error(w, "forced", cl.ChatStatus)
 		return
 	}
-	ctxID, text, ok := parseChat(body)
+	ctxID, taskID, text, answers, ok := parseChat(body)
 	if !ok {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	steps := cl.ChatSteps
 	f.mu.Lock()
 	if f.chatTurns == nil {
 		f.chatTurns = map[string]int{}
 	}
 	f.chatTurns[ctxID]++
 	turn := f.chatTurns[ctxID]
-	recordSession(cl, agentID(agentNS, agentName), ctxID, text, turn)
+	task := fmt.Sprintf("task-%s-%d", ctxID, turn)
+	switch {
+	case taskID != "":
+		task = taskID
+		text = fmt.Sprint(answers)
+		steps = ResumeChat()
+		resumeSession(cl, ctxID, taskID, answers)
+	case strings.Contains(strings.ToLower(text), AskTrigger):
+		steps = AskChat()
+		recordAsk(cl, agentID(agentNS, agentName), ctxID, task, text)
+	default:
+		recordSession(cl, agentID(agentNS, agentName), ctxID, text, turn)
+	}
 	f.mu.Unlock()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -135,12 +203,11 @@ func (f *Fake) chat(w http.ResponseWriter, r *http.Request, cl *FakeCluster, use
 		cancelled()
 		return
 	}
-	steps := cl.ChatSteps
 	if steps == nil {
 		steps = DefaultChat()
 	}
 	esc, _ := json.Marshal(text)
-	rep := strings.NewReplacer("{{text}}", string(esc[1:len(esc)-1]), "{{turn}}", strconv.Itoa(turn))
+	rep := strings.NewReplacer("{{text}}", string(esc[1:len(esc)-1]), "{{turn}}", strconv.Itoa(turn), "{{task}}", task)
 	for _, s := range steps {
 		if s.Delay > 0 {
 			select {
@@ -163,21 +230,50 @@ func (f *Fake) chat(w http.ResponseWriter, r *http.Request, cl *FakeCluster, use
 	}
 }
 
-// parseChat validates the A2A body and returns contextId and the single text part.
-func parseChat(body map[string]any) (ctxID, text string, ok bool) {
+// parseChat validates the A2A body. A plain message has a single text part.
+// A HITL resume (kagent's ask_user answer) has a taskId, a decision data part
+// and a text part; it returns the answers (nil for a reject, i.e. skip).
+func parseChat(body map[string]any) (ctxID, taskID, text string, answers [][]string, ok bool) {
 	if body["method"] != "message/stream" {
 		return
 	}
 	params, _ := body["params"].(map[string]any)
 	msg, _ := params["message"].(map[string]any)
 	ctxID, _ = msg["contextId"].(string)
+	taskID, _ = msg["taskId"].(string)
 	parts, _ := msg["parts"].([]any)
-	if ctxID == "" || len(parts) != 1 {
-		return "", "", false
+	if ctxID == "" {
+		return "", "", "", nil, false
+	}
+	if taskID != "" {
+		if len(parts) != 2 {
+			return "", "", "", nil, false
+		}
+		d, _ := parts[0].(map[string]any)
+		data, _ := d["data"].(map[string]any)
+		list, isList := data["ask_user_answers"].([]any)
+		skip := data["decision_type"] == "reject"
+		if d["kind"] != "data" || !(skip || data["decision_type"] == "approve" && isList) {
+			return "", "", "", nil, false
+		}
+		for _, a := range list {
+			m, _ := a.(map[string]any)
+			vals, _ := m["answer"].([]any)
+			var ss []string
+			for _, v := range vals {
+				s, _ := v.(string)
+				ss = append(ss, s)
+			}
+			answers = append(answers, ss)
+		}
+		parts = parts[1:]
+	}
+	if len(parts) != 1 {
+		return "", "", "", nil, false
 	}
 	p, _ := parts[0].(map[string]any)
 	if p["kind"] != "text" {
-		return "", "", false
+		return "", "", "", nil, false
 	}
 	text, ok = p["text"].(string)
 	return
@@ -214,6 +310,12 @@ func recordSession(cl *FakeCluster, agent, ctxID, text string, turn int) {
 		},
 		"artifacts": []any{map[string]any{"artifactId": "a1", "parts": []any{textPart(final)}}},
 	}
+	appendTask(cl, agent, ctxID, text, task, now)
+}
+
+// appendTask adds task to the session for ctxID, creating the session (named
+// after text) if it is new. Caller holds f.mu.
+func appendTask(cl *FakeCluster, agent, ctxID, text string, task map[string]any, now time.Time) {
 	for i := range cl.Sessions {
 		s := &cl.Sessions[i]
 		if s.ID != ctxID {
@@ -231,6 +333,68 @@ func recordSession(cl *FakeCluster, agent, ctxID, text string, turn int) {
 	}
 	b, _ := json.Marshal([]any{task})
 	cl.Sessions = append(cl.Sessions, FakeSession{ID: ctxID, Name: name, AgentID: agent, Updated: now, TasksJSON: string(b)})
+}
+
+// recordAsk stores an AskChat turn as an input-required task, as kagent does:
+// the confirmation is in the status message, not yet in the history. Caller
+// holds f.mu.
+func recordAsk(cl *FakeCluster, agent, ctxID, taskID, text string) {
+	now := time.Now().UTC()
+	var conf any
+	_ = json.Unmarshal([]byte(AskConfirmation), &conf)
+	userMsg := map[string]any{"kind": "message", "role": "user", "messageId": "u-" + taskID,
+		"parts": []any{map[string]any{"kind": "text", "text": text}}}
+	task := map[string]any{
+		"id": taskID, "contextId": ctxID, "kind": "task",
+		"status": map[string]any{"state": "input-required", "timestamp": now.Format(time.RFC3339Nano),
+			"message": map[string]any{"kind": "message", "role": "agent", "messageId": "conf-" + taskID, "parts": []any{conf}}},
+		"history": []any{userMsg, userMsg},
+	}
+	appendTask(cl, agent, ctxID, text, task, now)
+}
+
+// resumeSession completes the input-required task taskID with the user's
+// answers: the confirmation moves to the history, followed by the decision
+// and the reply. Caller holds f.mu.
+func resumeSession(cl *FakeCluster, ctxID, taskID string, answers [][]string) {
+	now := time.Now().UTC()
+	for i := range cl.Sessions {
+		s := &cl.Sessions[i]
+		if s.ID != ctxID {
+			continue
+		}
+		var tasks []map[string]any
+		_ = json.Unmarshal([]byte(s.TasksJSON), &tasks)
+		for _, t := range tasks {
+			if t["id"] != taskID {
+				continue
+			}
+			st, _ := t["status"].(map[string]any)
+			hist, _ := t["history"].([]any)
+			if m := st["message"]; m != nil {
+				hist = append(hist, m)
+			}
+			decision := map[string]any{"decision_type": "reject"}
+			if answers != nil {
+				list := make([]any, len(answers))
+				for j, a := range answers {
+					list[j] = map[string]any{"answer": a}
+				}
+				decision = map[string]any{"decision_type": "approve", "ask_user_answers": list}
+			}
+			hist = append(hist,
+				map[string]any{"kind": "message", "role": "user", "messageId": "d-" + taskID, "parts": []any{
+					map[string]any{"kind": "data", "data": decision},
+					map[string]any{"kind": "text", "text": "Answered questions"}}},
+				map[string]any{"kind": "message", "role": "agent", "messageId": "r-" + taskID, "parts": []any{
+					map[string]any{"kind": "text", "text": fmt.Sprintf("Thanks, you chose %v.", answers)}}})
+			t["history"] = hist
+			t["status"] = map[string]any{"state": "completed", "timestamp": now.Format(time.RFC3339Nano)}
+		}
+		b, _ := json.Marshal(tasks)
+		s.TasksJSON, s.Updated = string(b), now
+		return
+	}
 }
 
 // LastSessionsURL returns a copy of the URL of the most recent /api/sessions* request.

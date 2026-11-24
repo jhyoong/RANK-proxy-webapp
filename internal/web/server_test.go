@@ -779,6 +779,7 @@ func TestCluster_StaleCacheRelists(t *testing.T) {
 type chatCall struct {
 	row                        clusters.Row
 	principal, text, contextID string
+	resume                     *chat.Resume
 }
 
 // stubChat records calls and emits script. A text of "block" waits for the
@@ -792,9 +793,9 @@ type stubChat struct {
 	slowErr chan error
 }
 
-func (s *stubChat) Send(ctx context.Context, _ []auth.SiteResult, row clusters.Row, principal, text, contextID string, emit func(chat.Out)) {
+func (s *stubChat) Send(ctx context.Context, _ []auth.SiteResult, row clusters.Row, principal, text, contextID string, resume *chat.Resume, emit func(chat.Out)) {
 	s.mu.Lock()
-	s.calls = append(s.calls, chatCall{row, principal, text, contextID})
+	s.calls = append(s.calls, chatCall{row, principal, text, contextID, resume})
 	script := s.script
 	s.mu.Unlock()
 	s.started <- struct{}{}
@@ -875,6 +876,74 @@ func TestChat_StreamsEvents(t *testing.T) {
 	call := hs.ch.calls[0]
 	if call.row.Site != "site-1" || call.row.ID != "c-abc12" || call.principal != principal || call.text != "why?" || call.contextID != testCtxID {
 		t.Fatalf("call %+v", call)
+	}
+}
+
+func resumeBody(taskID string, answers any) string {
+	b, _ := json.Marshal(map[string]any{"context_id": testCtxID, "task_id": taskID, "answers": answers})
+	return string(b)
+}
+
+func TestChat_Resume(t *testing.T) {
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	rr := hs.postChat("/clusters/site-1/c-abc12/chat", resumeBody("task-1", [][]string{{"prod"}, {"a", "b"}}), "application/json", hs.csrfOf(t, c), c)
+	if rr.Code != 200 || len(hs.ch.calls) != 1 {
+		t.Fatalf("status %d calls %d", rr.Code, len(hs.ch.calls))
+	}
+	r := hs.ch.calls[0].resume
+	if r == nil || r.TaskID != "task-1" || !reflect.DeepEqual(r.Answers, [][]string{{"prod"}, {"a", "b"}}) {
+		t.Fatalf("resume %+v", r)
+	}
+	if hs.ch.calls[0].contextID != testCtxID {
+		t.Fatalf("call %+v", hs.ch.calls[0])
+	}
+}
+
+func TestChat_Skip(t *testing.T) {
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	body := `{"context_id":"` + testCtxID + `","task_id":"task-1","skip":true}`
+	rr := hs.postChat("/clusters/site-1/c-abc12/chat", body, "application/json", hs.csrfOf(t, c), c)
+	if rr.Code != 200 || len(hs.ch.calls) != 1 {
+		t.Fatalf("status %d calls %d", rr.Code, len(hs.ch.calls))
+	}
+	if r := hs.ch.calls[0].resume; r == nil || !r.Skip || r.TaskID != "task-1" || r.Answers != nil {
+		t.Fatalf("resume %+v", r)
+	}
+}
+
+func TestChat_ResumeRejects(t *testing.T) {
+	hs := newHarness(t, true)
+	c := hs.login(t)
+	csrf := hs.csrfOf(t, c)
+	many := make([][]string, 51)
+	for i := range many {
+		many[i] = []string{"x"}
+	}
+	for _, tc := range []struct {
+		name, body string
+		want       int
+	}{
+		{"task without answers", resumeBody("task-1", nil), 400},
+		{"answers without task", resumeBody("", [][]string{{"x"}}), 400},
+		{"bad task id", resumeBody("../x", [][]string{{"x"}}), 400},
+		{"empty answers", resumeBody("task-1", [][]string{}), 400},
+		{"unanswered question", resumeBody("task-1", [][]string{{"x"}, {" "}}), 400},
+		{"too many questions", resumeBody("task-1", many), 400},
+		{"answers too long", resumeBody("task-1", [][]string{{strings.Repeat("x", 8193)}}), 413},
+		{"bad context id", `{"context_id":"abc","task_id":"task-1","answers":[["x"]]}`, 400},
+		{"skip with answers", `{"context_id":"` + testCtxID + `","task_id":"task-1","skip":true,"answers":[["x"]]}`, 400},
+		{"skip without task", `{"context_id":"` + testCtxID + `","skip":true}`, 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if rr := hs.postChat("/clusters/site-1/c-abc12/chat", tc.body, "application/json", csrf, c); rr.Code != tc.want {
+				t.Fatalf("status %d, want %d", rr.Code, tc.want)
+			}
+		})
+	}
+	if n := hs.ch.count(); n != 0 {
+		t.Fatalf("Send called %d times", n)
 	}
 }
 
