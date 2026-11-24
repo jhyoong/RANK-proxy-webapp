@@ -22,12 +22,52 @@ import (
 // Chat is what the web layer needs from chat.Service. Send emits done last
 // and returns once the reply is over.
 type Chat interface {
-	Send(ctx context.Context, sites []auth.SiteResult, row clusters.Row, principal, text, contextID string, emit func(chat.Out))
+	Send(ctx context.Context, sites []auth.SiteResult, row clusters.Row, principal, text, contextID string, resume *chat.Resume, emit func(chat.Out))
 }
 
+// maxQuestions caps the answer lists of one ask_user reply.
+const maxQuestions = 50
+
+// chatRequest is a new message (Text), or the reply to an ask_user question
+// paused in TaskID: its Answers (one list per question, in order) or Skip.
 type chatRequest struct {
-	Text      string `json:"text"`
-	ContextID string `json:"context_id"`
+	Text      string     `json:"text"`
+	ContextID string     `json:"context_id"`
+	TaskID    string     `json:"task_id"`
+	Answers   [][]string `json:"answers"`
+	Skip      bool       `json:"skip"`
+}
+
+// resume validates the answer fields: it returns nil for a plain message, or
+// the HTTP status for a bad request.
+func (req chatRequest) resume(limit int) (*chat.Resume, int) {
+	if req.TaskID == "" && req.Answers == nil && !req.Skip {
+		return nil, 0
+	}
+	if req.Skip {
+		if !a2a.ValidTaskID(req.TaskID) || req.Answers != nil {
+			return nil, http.StatusBadRequest
+		}
+		return &chat.Resume{TaskID: req.TaskID, Skip: true}, 0
+	}
+	if !a2a.ValidTaskID(req.TaskID) || len(req.Answers) == 0 || len(req.Answers) > maxQuestions {
+		return nil, http.StatusBadRequest
+	}
+	size := 0
+	for _, list := range req.Answers {
+		answered := false
+		for _, a := range list {
+			size += len(a)
+			answered = answered || strings.TrimSpace(a) != ""
+		}
+		if !answered || len(list) > maxQuestions {
+			return nil, http.StatusBadRequest
+		}
+	}
+	if size > limit {
+		return nil, http.StatusRequestEntityTooLarge
+	}
+	return &chat.Resume{TaskID: req.TaskID, Answers: req.Answers}, 0
 }
 
 // chat streams one kagent reply as server-sent events. Every check answers
@@ -48,7 +88,8 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := s.cfg.Chat.MaxMessageBytes
 	s.setBodyDeadline(w)
-	r.Body = http.MaxBytesReader(w, r.Body, int64(limit)+1024)
+	// Room for the JSON around an ask_user reply's answers, which may total limit.
+	r.Body = http.MaxBytesReader(w, r.Body, int64(limit)+16<<10)
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var tooBig *http.MaxBytesError
@@ -66,8 +107,16 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "message too long", http.StatusRequestEntityTooLarge)
 		return
 	}
-	if strings.TrimSpace(req.Text) == "" || !a2a.ValidUUID(req.ContextID) {
-		http.Error(w, "bad request", http.StatusBadRequest)
+	resume, code := req.resume(limit)
+	if code == 0 && (resume == nil && strings.TrimSpace(req.Text) == "" || !a2a.ValidUUID(req.ContextID)) {
+		code = http.StatusBadRequest
+	}
+	if code != 0 {
+		msg := "bad request"
+		if code == http.StatusRequestEntityTooLarge {
+			msg = "message too long"
+		}
+		http.Error(w, msg, code)
 		return
 	}
 	row, found := s.listing(r, sess).Find(r.PathValue("site"), r.PathValue("id"))
@@ -92,7 +141,7 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 	_ = rc.Flush()
 	expired := false
-	s.ch.Send(r.Context(), sess.Sites, row, sess.Principal, req.Text, req.ContextID, func(o chat.Out) {
+	s.ch.Send(r.Context(), sess.Sites, row, sess.Principal, req.Text, req.ContextID, resume, func(o chat.Out) {
 		if e, ok := o.Data.(chat.Error); ok && o.Type == "error" && e.Code == "expired" {
 			expired = true
 		}

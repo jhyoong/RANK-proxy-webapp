@@ -40,7 +40,7 @@ func metaType(m map[string]json.RawMessage) string {
 }
 
 // ParseDataPart classifies one A2A data part. Both returns are nil for a part
-// that is not a tool call or result.
+// that is not a tool call or result, or is HITL plumbing (see hidden).
 func ParseDataPart(meta map[string]json.RawMessage, data json.RawMessage) (call *ToolCall, result *ToolResult) {
 	typ := metaType(meta)
 	if typ == "" {
@@ -53,6 +53,9 @@ func ParseDataPart(meta map[string]json.RawMessage, data json.RawMessage) (call 
 		Response json.RawMessage `json:"response"`
 	}
 	_ = json.Unmarshal(data, &d) // a malformed body still yields an empty call
+	if hidden(d.Name, d.Response) {
+		return nil, nil
+	}
 	if typ == "function_call" {
 		return &ToolCall{ID: d.ID, Name: d.Name, Args: d.Args}, nil
 	}

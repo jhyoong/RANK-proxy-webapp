@@ -13,9 +13,12 @@ import (
 const (
 	noticeUnfinished = "This reply didn't finish."
 	noticeApproval   = "The agent asked for approval, which the portal doesn't support yet."
+	noticeUnanswered = "This question wasn't answered."
 )
 
-// Item is one step of an agent reply: "text", "tool" or "notice".
+// Item is one step of an agent reply: "text", "tool", "notice" or "ask" (an
+// ask_user question set the user answered, with Answers in question order, or
+// Skipped).
 type Item struct {
 	Kind    string `json:"kind"`
 	Text    string `json:"text,omitempty"`
@@ -25,6 +28,18 @@ type Item struct {
 	Summary string `json:"summary,omitempty"`
 	Result  string `json:"result,omitempty"`
 	IsError bool   `json:"is_error,omitempty"`
+
+	Questions []a2a.Question `json:"questions,omitempty"`
+	Answers   [][]string     `json:"answers,omitempty"`
+	Skipped   bool           `json:"skipped,omitempty"`
+	Subagent  string         `json:"subagent,omitempty"`
+}
+
+// Pending is the ask_user question the conversation's last task is paused
+// on. The browser answers it by resuming TaskID.
+type Pending struct {
+	TaskID string `json:"task_id"`
+	a2a.Ask
 }
 
 // Turn is one user message and the agent's reply.
@@ -35,10 +50,11 @@ type Turn struct {
 }
 
 // Transcript is a whole conversation. Running is true while the last turn may
-// still be in progress.
+// still be in progress; Pending is set while it waits for an answer.
 type Transcript struct {
-	Turns   []Turn `json:"turns"`
-	Running bool   `json:"running"`
+	Turns   []Turn   `json:"turns"`
+	Running bool     `json:"running"`
+	Pending *Pending `json:"pending,omitempty"`
 }
 
 type part struct {
@@ -48,16 +64,20 @@ type part struct {
 	Metadata map[string]json.RawMessage `json:"metadata"`
 }
 
+type message struct {
+	Role      string `json:"role"`
+	MessageID string `json:"messageId"`
+	Parts     []part `json:"parts"`
+}
+
 type task struct {
+	ID     string `json:"id"`
 	Status struct {
-		State     string `json:"state"`
-		Timestamp string `json:"timestamp"`
+		State     string   `json:"state"`
+		Timestamp string   `json:"timestamp"`
+		Message   *message `json:"message"`
 	} `json:"status"`
-	History []struct {
-		Role      string `json:"role"`
-		MessageID string `json:"messageId"`
-		Parts     []part `json:"parts"`
-	} `json:"history"`
+	History   []message `json:"history"`
 	Artifacts []struct {
 		Parts []part `json:"parts"`
 	} `json:"artifacts"`
@@ -91,11 +111,52 @@ func Normalise(tasksJSON []byte, now time.Time, maxDuration time.Duration) (Tran
 		case unfinished(t.Status.State):
 			tu.Items = append(tu.Items, Item{Kind: "notice", Text: noticeUnfinished})
 		case t.Status.State == "input-required":
-			tu.Items = append(tu.Items, Item{Kind: "notice", Text: noticeApproval})
+			switch ask := pendingAsk(t); {
+			case ask != nil && last:
+				tr.Pending = &Pending{TaskID: t.ID, Ask: *ask}
+			case ask != nil:
+				tu.Items = append(tu.Items, Item{Kind: "notice", Text: noticeUnanswered})
+			default:
+				tu.Items = append(tu.Items, Item{Kind: "notice", Text: noticeApproval})
+			}
 		}
 		tr.Turns = append(tr.Turns, tu)
 	}
 	return tr, nil
+}
+
+// pendingAsk returns the ask_user question in an input-required task's status
+// message, or nil if it is paused on something else (a tool approval).
+func pendingAsk(t task) *a2a.Ask {
+	if t.Status.Message == nil {
+		return nil
+	}
+	for _, p := range t.Status.Message.Parts {
+		if p.Kind == "data" {
+			if a := a2a.ParseAsk(p.Metadata, p.Data); a != nil {
+				return a
+			}
+		}
+	}
+	return nil
+}
+
+// decisionAfter returns the first user decision after history[i], as
+// kagent's UI pairs them, or nil if there is none yet.
+func decisionAfter(history []message, i int) *a2a.Decision {
+	for _, m := range history[i+1:] {
+		if m.Role != "user" {
+			continue
+		}
+		for _, p := range m.Parts {
+			if p.Kind == "data" {
+				if d := a2a.ParseDecision(p.Data); d != nil {
+					return d
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func recent(ts string, now time.Time, maxDuration time.Duration) bool {
@@ -106,8 +167,9 @@ func recent(ts string, now time.Time, maxDuration time.Duration) bool {
 func normaliseTask(t task) Turn {
 	tu := Turn{Items: []Item{}, State: t.Status.State}
 	seen := map[string]bool{}
+	asked := map[string]bool{}
 	hasText := false
-	for _, m := range t.History {
+	for i, m := range t.History {
 		if m.MessageID != "" {
 			if seen[m.MessageID] {
 				continue
@@ -133,6 +195,14 @@ func normaliseTask(t task) Turn {
 					hasText = true
 				}
 			case "data":
+				// An unanswered question is shown from the status message (see Normalise).
+				if a := a2a.ParseAsk(p.Metadata, p.Data); a != nil && !asked[a.ID] {
+					if d := decisionAfter(t.History, i); d != nil {
+						asked[a.ID] = true
+						tu.Items = append(tu.Items, Item{Kind: "ask", Questions: a.Questions, Answers: d.Answers,
+							Skipped: d.Type == "reject", Subagent: a.Subagent})
+					}
+				}
 				call, res := a2a.ParseDataPart(p.Metadata, p.Data)
 				if call != nil {
 					tu.Items = append(tu.Items, Item{Kind: "tool", ID: call.ID, Name: call.Name,

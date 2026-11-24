@@ -2,6 +2,7 @@ package history_test
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -182,5 +183,98 @@ func TestNormalise_HugeResult(t *testing.T) {
 func TestNormalise_BadJSON(t *testing.T) {
 	if _, err := history.Normalise([]byte(`{"not":"array"}`), now, maxDur); err == nil {
 		t.Fatal("want error")
+	}
+}
+
+// askTask is a task paused on (or resumed from) an ask_user question, shaped
+// as kagent stores it: while input-required, the confirmation is only in the
+// status message; once answered, it is in the history, followed by the user's
+// decision.
+func askTask(answered bool) string {
+	conf := `{"kind":"data","metadata":{"kagent_type":"function_call","kagent_is_long_running":true},
+	 "data":{"name":"adk_request_confirmation","id":"adk-conf-1","args":{
+	  "originalFunctionCall":{"name":"ask_user","id":"call_ask","args":{"questions":[
+	   {"question":"Which env?","choices":["dev","prod"]},{"question":"Why?"}]}},
+	  "toolConfirmation":{"confirmed":false}}}}`
+	head := `{"id":"T1","contextId":"S1","kind":"task",`
+	hist := `{"role":"user","messageId":"u1","parts":[{"kind":"text","text":"deploy it"}]},
+	 {"role":"agent","messageId":"a1","parts":[{"kind":"data","metadata":{"kagent_type":"function_call"},
+	   "data":{"id":"call_ask","name":"ask_user","args":{"questions":[]}}}]},
+	 {"role":"agent","messageId":"a2","parts":[{"kind":"data","metadata":{"kagent_type":"function_response"},
+	   "data":{"id":"call_ask","name":"ask_user","response":{"status":"pending"}}}]}`
+	if !answered {
+		return head + `"status":{"state":"input-required","timestamp":"` + doneTS + `",
+		 "message":{"role":"agent","messageId":"c1","parts":[` + conf + `]}},"history":[` + hist + `]}`
+	}
+	return head + `"status":{"state":"completed","timestamp":"` + doneTS + `"},"history":[` + hist + `,
+	 {"role":"agent","messageId":"c1","parts":[` + conf + `]},
+	 {"role":"user","messageId":"d1","parts":[{"kind":"data","data":{"decision_type":"approve",
+	   "ask_user_answers":[{"answer":["prod"]},{"answer":["because"]}]}},{"kind":"text","text":"Answered questions"}]},
+	 {"role":"agent","messageId":"a3","parts":[{"kind":"data","metadata":{"kagent_type":"function_response"},
+	   "data":{"id":"call_ask","name":"ask_user","response":{"result":"ok"}}}]},
+	 {"role":"agent","messageId":"a4","parts":[{"kind":"text","text":"Deploying to prod."}]}]}`
+}
+
+func TestNormalise_PendingAsk(t *testing.T) {
+	tr := mustNormalise(t, askTask(false))
+	if tr.Running || tr.Pending == nil {
+		t.Fatalf("%+v", tr)
+	}
+	p := tr.Pending
+	if p.TaskID != "T1" || p.ID != "adk-conf-1" || len(p.Questions) != 2 || p.Questions[0].Choices[1] != "prod" {
+		t.Fatalf("pending %+v", p)
+	}
+	tu := tr.Turns[0]
+	if tu.User != "deploy it" {
+		t.Fatalf("turn %+v", tu)
+	}
+	for _, it := range tu.Items {
+		if it.Kind == "notice" || it.Kind == "ask" || it.Result != "" {
+			t.Fatalf("unexpected item %+v", it)
+		}
+	}
+	b, _ := json.Marshal(tr)
+	if !strings.Contains(string(b), `"pending":{"task_id":"T1","id":"adk-conf-1","questions":[`) {
+		t.Fatalf("json %s", b)
+	}
+}
+
+func TestNormalise_AnsweredAsk(t *testing.T) {
+	tr := mustNormalise(t, askTask(true))
+	if tr.Pending != nil {
+		t.Fatalf("pending %+v", tr.Pending)
+	}
+	tu := tr.Turns[0]
+	if tu.User != "deploy it" || len(tu.Items) != 3 {
+		t.Fatalf("turn %+v", tu)
+	}
+	if it := tu.Items[0]; it.Kind != "tool" || it.Name != "ask_user" || it.Result != "ok" {
+		t.Fatalf("item0 %+v", it)
+	}
+	it := tu.Items[1]
+	if it.Kind != "ask" || len(it.Questions) != 2 || !reflect.DeepEqual(it.Answers, [][]string{{"prod"}, {"because"}}) {
+		t.Fatalf("item1 %+v", it)
+	}
+	if it := tu.Items[2]; it.Kind != "text" || it.Text != "Deploying to prod." {
+		t.Fatalf("item2 %+v", it)
+	}
+}
+
+func TestNormalise_UnansweredEarlierAsk(t *testing.T) {
+	tr := mustNormalise(t, askTask(false), docTask("completed", doneTS))
+	if tr.Pending != nil {
+		t.Fatalf("pending %+v", tr.Pending)
+	}
+	if it := lastItem(tr.Turns[0]); it.Kind != "notice" || it.Text != "This question wasn't answered." {
+		t.Fatalf("%+v", it)
+	}
+}
+
+func TestNormalise_SkippedAsk(t *testing.T) {
+	task := strings.Replace(askTask(true), `"decision_type":"approve",
+	   "ask_user_answers":[{"answer":["prod"]},{"answer":["because"]}]`, `"decision_type":"reject","rejection_reason":"skipped"`, 1)
+	it := mustNormalise(t, task).Turns[0].Items[1]
+	if it.Kind != "ask" || !it.Skipped || it.Answers != nil {
+		t.Fatalf("%+v", it)
 	}
 }

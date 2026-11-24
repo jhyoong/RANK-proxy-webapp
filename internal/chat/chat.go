@@ -17,8 +17,8 @@ import (
 	"github.com/jhyoong/RANK-proxy-webapp/internal/rancher"
 )
 
-// Out is one event for the browser. Type is "progress", "tool", "answer",
-// "state", "error", "ping" or "done"; Data is nil for ping and otherwise the
+// Out is one event for the browser. Type is "progress", "tool",
+// "tool_result", "answer", "ask", "state", "error", "ping" or "done"; Data is nil for ping and otherwise the
 // matching struct below.
 type Out struct {
 	Type string
@@ -52,6 +52,21 @@ type ToolResult struct {
 // Answer is agent text from a final event or an artifact.
 type Answer struct {
 	Text string `json:"text"`
+}
+
+// Ask is an ask_user request the agent paused on. The browser answers it by
+// sending a Resume with TaskID.
+type Ask struct {
+	TaskID string `json:"task_id"`
+	a2a.Ask
+}
+
+// Resume answers the ask_user request paused in TaskID: one answer list per
+// question, in question order, or Skip to decline it.
+type Resume struct {
+	TaskID  string
+	Answers [][]string
+	Skip    bool
 }
 
 // State is a task state change.
@@ -113,6 +128,7 @@ type reply struct {
 	result     string
 	body       string // rancher_body for the log
 	errMsg     string
+	asked      map[string]bool // ask IDs already emitted
 }
 
 func (r *reply) fail(result, msg string) { r.result, r.errMsg = result, msg }
@@ -135,10 +151,11 @@ type next struct {
 	err error
 }
 
-// Send relays text to the agent on row's cluster and emits the reply. It
-// always emits exactly one done, last, and returns only after the upstream
-// body is closed and its reader goroutine has exited.
-func (s *Service) Send(ctx context.Context, sites []auth.SiteResult, row clusters.Row, principal, text, contextID string, emit func(Out)) {
+// Send relays text to the agent on row's cluster and emits the reply. With a
+// non-nil resume it answers a paused ask_user request instead, and text is
+// ignored. It always emits exactly one done, last, and returns only after the
+// upstream body is closed and its reader goroutine has exited.
+func (s *Service) Send(ctx context.Context, sites []auth.SiteResult, row clusters.Row, principal, text, contextID string, resume *Resume, emit func(Out)) {
 	r := &reply{start: s.now()}
 	defer func() {
 		if r.errMsg != "" {
@@ -154,7 +171,7 @@ func (s *Service) Send(ctx context.Context, sites []auth.SiteResult, row cluster
 			State: r.state, TaskID: r.taskID, FirstEventMs: r.firstEvent.Milliseconds(),
 			TotalMs: total.Milliseconds(), Events: r.events,
 		}})
-		args := []any{"event", "chat", "site", row.Site, "cluster", row.ID, "principal", principal,
+		args := []any{"event", "chat", "resume", resume != nil, "site", row.Site, "cluster", row.ID, "principal", principal,
 			"context_id", contextID, "task_id", r.taskID, "http_code", r.httpCode,
 			"first_event_ms", r.firstEvent.Milliseconds(), "total_ms", total.Milliseconds(),
 			"events", r.events, "result", r.result}
@@ -178,7 +195,14 @@ func (s *Service) Send(ctx context.Context, sites []auth.SiteResult, row cluster
 
 	rctx, cancel := context.WithTimeout(ctx, s.cfg.MaxDuration)
 	defer cancel()
-	body, err := c.PostStream(rctx, bearer, a2a.Path(row.ID, s.kagent), a2a.StreamRequest(text, contextID), s.cfg.IdleTimeout)
+	req := a2a.StreamRequest(text, contextID)
+	switch {
+	case resume != nil && resume.Skip:
+		req = a2a.SkipRequest(contextID, resume.TaskID)
+	case resume != nil:
+		req = a2a.ResumeRequest(contextID, resume.TaskID, resume.Answers)
+	}
+	body, err := c.PostStream(rctx, bearer, a2a.Path(row.ID, s.kagent), req, s.cfg.IdleTimeout)
 	if err != nil {
 		s.preStreamError(ctx, rctx, row.Site, err, r)
 		return
@@ -382,6 +406,18 @@ func (s *Service) event(contextID string, ev a2a.Event, r *reply, emit func(Out)
 		text, isErr := a2a.FormatResult(rs.Response)
 		emit(Out{Type: "tool_result", Data: ToolResult{ID: rs.ID, Name: rs.Name, Result: text, IsError: isErr}})
 	}
+	// kagent may repeat the confirmation in a working update and the final
+	// input-required one: show each question set once.
+	for _, a := range ev.Asks {
+		if r.asked == nil {
+			r.asked = map[string]bool{}
+		}
+		if r.asked[a.ID] {
+			continue
+		}
+		r.asked[a.ID] = true
+		emit(Out{Type: "ask", Data: Ask{TaskID: r.taskID, Ask: a}})
+	}
 	if ev.State != "" && ev.State != r.state {
 		r.state = ev.State
 		emit(Out{Type: "state", Data: State{State: ev.State}})
@@ -390,6 +426,9 @@ func (s *Service) event(contextID string, ev a2a.Event, r *reply, emit func(Out)
 	switch {
 	case ev.State == "failed" || ev.State == "rejected":
 		r.fail("failed", "The agent reported the task failed")
+		return true
+	case ev.Final && ev.State == "input-required" && len(r.asked) > 0:
+		r.result = "input-required" // the browser shows the question
 		return true
 	case ev.Final && ev.State == "input-required":
 		r.fail("input-required", "The agent is asking for approval, which the portal doesn't support yet")

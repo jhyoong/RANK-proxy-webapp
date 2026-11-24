@@ -27,6 +27,7 @@ type env struct {
 	f     *ranchertest.Fake
 	sites []auth.SiteResult
 	row   clusters.Row
+	logs  *strings.Builder
 }
 
 func setup(t *testing.T, c ranchertest.FakeCluster) env {
@@ -45,7 +46,9 @@ func setup(t *testing.T, c ranchertest.FakeCluster) env {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	res := auth.New([]*rancher.Client{cli}, time.Hour, log).Login(context.Background(), "jdoe", "pw")
 	row := clusters.Row{Site: "site-1", Cluster: rancher.Cluster{ID: "c-1", Connected: true}}
-	return env{history.New([]*rancher.Client{cli}, kagentCfg, 30*time.Minute), f, res.Sites, row}
+	logs := &strings.Builder{}
+	hlog := slog.New(slog.NewTextHandler(logs, nil))
+	return env{history.New([]*rancher.Client{cli}, kagentCfg, 30*time.Minute, hlog), f, res.Sites, row, logs}
 }
 
 // uid returns a valid lowercase UUID numbered n.
@@ -93,6 +96,31 @@ func TestList_AgentMissing(t *testing.T) {
 	got, err := e.svc.List(context.Background(), e.sites, e.row)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("%v %v", got, err)
+	}
+	// The empty sidebar is explained in the log.
+	l := e.logs.String()
+	if !strings.Contains(l, "event=history_list") || !strings.Contains(l, "result=not-found") ||
+		!strings.Contains(l, "agent=kagent/k8s-agent") || !strings.Contains(l, "kagent_body=") {
+		t.Fatalf("log %q", l)
+	}
+}
+
+func TestList_LogsCounts(t *testing.T) {
+	ss := []ranchertest.FakeSession{{ID: uid(1), AgentID: agentID}, {ID: "not-a-uuid", AgentID: agentID}}
+	e := setup(t, ranchertest.FakeCluster{Sessions: ss})
+	if _, err := e.svc.List(context.Background(), e.sites, e.row); err != nil {
+		t.Fatal(err)
+	}
+	l := e.logs.String()
+	if !strings.Contains(l, "result=ok") || !strings.Contains(l, "sessions=2") || !strings.Contains(l, "shown=1") ||
+		!strings.Contains(l, "skipped_ids=1") || !strings.Contains(l, "site=site-1") || !strings.Contains(l, "cluster=c-1") {
+		t.Fatalf("log %q", l)
+	}
+	// Transcript re-checks the list on every poll; that check is not logged.
+	before := strings.Count(e.logs.String(), "history_list")
+	_, _ = e.svc.Transcript(context.Background(), e.sites, e.row, uid(1))
+	if n := strings.Count(e.logs.String(), "history_list"); n != before {
+		t.Fatalf("transcript logged the list: %q", e.logs.String())
 	}
 }
 

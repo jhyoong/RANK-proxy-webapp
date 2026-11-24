@@ -100,6 +100,7 @@ func main() {
 	log.Printf("wrote %s; now run: go run ./cmd/portal -config %s  (then open http://127.0.0.1:8080)", cfgPath, cfgPath)
 	log.Printf("users: admin1/pass1 (all ok), drift/pass1 (site-2 rejects), nopr/pass1 (no AD principal), limited/pass1 (no-access on prod clusters)")
 	log.Printf("chat: ready clusters stream at 300ms/step; per site n=20 silent 20s gap, n=22 JSON-RPC error, n=23 failed, n=25 hang, n=26 cut off")
+	log.Printf("chat: a message containing %q pauses on an ask_user question", ranchertest.AskTrigger)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)

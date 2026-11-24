@@ -117,7 +117,11 @@ Tool calls and results are A2A data parts:
 - **Result shapes:** MCP tools return `{content, isError}`; other tools return `{"result": ...}`. **[src]**
 - **Go runtime agents** use `adk_type`, `adk_partial` and `adk_thought` instead of the `kagent_` keys. Read both prefixes, as the kagent UI does (`ui/src/lib/messageHandlers.ts:456`). **[src]**
 - **Sub-agent calls** are tool calls whose name contains `__NS__`. The call part also carries `kagent_subagent_session_id`, which points to a child session (`source: "agent"`) holding the sub-agent's own steps. **[src]**
-- **Human approval (HITL):** a turn can end in `input-required` with an `adk_request_confirmation` call. The MVP's agent is read-only, so treat this as "agent asked for approval" and don't build an approval flow yet. **[src]**
+- **Human-in-the-loop (HITL):** a turn can end in `input-required` with a long-running `adk_request_confirmation` call (metadata `kagent_type`/`adk_type: function_call`, `*_is_long_running: true`). **[src]**
+  - **`ask_user` questions (supported since v0.5.1):** `args.originalFunctionCall` is the `ask_user` call (or, for a subagent, the single entry of `args.toolConfirmation.payload.hitl_parts`), with `args.questions: [{question, choices?, multiple?}]`. To answer, send `message/stream` with the **same `taskId` and `contextId`** and parts `[{"kind":"data","metadata":{},"data":{"decision_type":"approve","ask_user_answers":[{"answer":[...]}, ...]}}, {"kind":"text","text":"Answered questions"}]`, with one answer list per question, in order. Without `taskId` or `decision_type`, kagent treats the message as a new turn and the question stays unanswered. This matches kagent's UI (`handleAskUserSubmit` in `ui/src/components/chat/ChatInterface.tsx`). **[src]**
+  - **Skipping a question (portal "Skip"):** send the same envelope with data `{"decision_type":"reject","rejection_reason":"..."}` and no `ask_user_answers`. kagent resumes the task, and `ask_user` tells the model the user cancelled (the Python ADK returns `{"status":"cancelled"}`; the Go ADK reports a rejection). **[src]**
+  - **Tool approvals** (`requireApproval`) use the same envelope (`decision_type: approve|reject|batch`). The portal does not support them yet: they still end with "agent asked for approval". **[src]**
+  - **Hidden plumbing:** the `adk_request_confirmation`/`adk_request_credential` calls, and the stub responses with `status: "pending"` or `"confirmation_requested"`, are not shown as tools. **[src]**
 
 ### Multiple turns
 

@@ -30,6 +30,7 @@ type Event struct {
 	Texts             []Text
 	Calls             []ToolCall
 	Results           []ToolResult
+	Asks              []Ask // ask_user requests (with state input-required)
 	ErrCode           int
 	ErrMessage        string
 	// Shape describes the event without content: kind, state, final, part
@@ -226,6 +227,9 @@ func parseEvent(b []byte) (Event, error) {
 		case "text":
 			ev.Texts = append(ev.Texts, Text{Text: p.Text, Partial: msgPartial || partial(p.Metadata)})
 		case "data":
+			if a := ParseAsk(p.Metadata, p.Data); a != nil {
+				ev.Asks = append(ev.Asks, *a)
+			}
 			call, res := ParseDataPart(p.Metadata, p.Data)
 			if call != nil {
 				ev.Calls = append(ev.Calls, *call)
