@@ -1,6 +1,6 @@
 # kagent Chat Sessions Through the Rancher API
 
-As of 2026-11-20. Covers kagent **v0.9.6** and Rancher **v2.13** and **v2.14**. The MVP targets Rancher v2.13, so every v2.13 requirement is called out. Read alongside [design.md](design.md) and [verification.md](verification.md).
+As of 2026-11-20. Covers kagent **v0.9.6** and Rancher **v2.13** and **v2.14**. The MVP targets Rancher v2.13, so every v2.13 requirement is called out. Read alongside [design.md](design.md).
 
 This explains how the portal backend calls kagent through Rancher in order to run a chat live and to rebuild a complete past session: user messages, each tool call, each tool result, thinking, and final answers. It does not cover login, the cluster list or the UI.
 

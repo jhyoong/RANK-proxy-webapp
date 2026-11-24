@@ -112,7 +112,7 @@ jobs:
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
           # Plain single-platform image (no attestation manifest list), so it mirrors
-          # cleanly into the air-gapped registry with skopeo / docker save.
+          # cleanly into the air-gapped registry.
           provenance: false
           cache-from: type=gha
 
