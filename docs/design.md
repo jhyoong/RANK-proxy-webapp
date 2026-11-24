@@ -1,6 +1,6 @@
 # Kagent Chat Portal via Rancher: Design
 
-As of 2026-11-19. Original plan, unchanged apart from formatting. Known inaccuracies and the checks to run against the target environment are in [verification.md](verification.md).
+As of 2026-11-19. Original plan, unchanged apart from formatting. Known inaccuracies and the checks to run against the target environment are kept out of this public repo.
 
 ## Overview and core concept
 

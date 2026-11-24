@@ -4,7 +4,7 @@ Run this inside the target network with the `v0.3.2` image, then type up the sho
 
 ## Before you start
 
-- [ ] **Image.** Move the image in using the README's `skopeo` steps. Deploy `v0.3.2` by digest. Record the digest.
+- [ ] **Image.** Move the image into the internal registry. Deploy `v0.3.2` by digest. Record the digest.
 - [ ] **Config.** Keep the v0.3.x ConfigMap. `kagent.agent_name` must be set. If kagent runs in a site's `local` cluster, set `clusters.include_local: true`.
 - [ ] **Rancher UI.** Open the Rancher UI for each site in another tab of the same browser, logged in. You need each site's cluster count, and the logged-in tab for S2.
 - [ ] **Known cluster.** Note one site-1 cluster that runs kagent.

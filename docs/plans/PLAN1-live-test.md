@@ -5,7 +5,7 @@ Run this inside the target network with the Plan 1 image, then bring back the fi
 ## Before you start
 
 - [ ] **AD lockout.** Find the lockout threshold and window (verification E11). A wrong password normally costs **one** AD attempt: site 1 answers and the portal stops. The exception is when site 1 times out or returns 502/503/504; then the portal tries site 2, which is a second attempt with the same password. Use a test admin account if one exists. Do each wrong-password test **once**. Click "Log in" once only: a double-click sends two logins. (A refresh after a failed login is safe; the portal redirects, so the password isn't re-sent.)
-- [ ] **Image.** Move the image in using the README's `skopeo` steps. Record the digest. Deploy by digest.
+- [ ] **Image.** Move the image into the internal registry. Record the digest. Deploy by digest.
 - [ ] **CA files.** Get the full CA chain for each Rancher site's hostname into `deploy/portal.yaml` (`site-N.pem`).
 - [ ] **Site order.** The first site in `sites:` is "site 1". Put the site that every user can authenticate on first (verification E20).
 - [ ] **Manifest check.** Optional: run `kubeconform -strict deploy/portal.yaml` if you have it. It was not run during development.

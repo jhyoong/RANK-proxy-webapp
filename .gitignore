@@ -2,6 +2,8 @@
 /portal
 /fakerancher
 /dev/
-# On-site findings: keep out of the public repo
+# On-site findings and verification notes: keep out of the public repo
 docs/quick-findings.md
+docs/verification.md
+docs/agent-verification.md
 scratch/*

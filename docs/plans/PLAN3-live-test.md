@@ -4,7 +4,7 @@ Run this inside the target network with the Plan 3 image (`v0.3.0`), then type u
 
 ## Before you start
 
-- [ ] **Image.** Move the image in using the README's `skopeo` steps. Deploy `v0.3.0` by digest. Record the digest.
+- [ ] **Image.** Move the image into the internal registry. Deploy `v0.3.0` by digest. Record the digest.
 - [ ] **Config.** In the ConfigMap, set `chat.log_events: true` (it logs one `event=chat_event` line per upstream event, for C9). Keep `kagent.agent_name` set to the deployed agent's name.
 - [ ] **Test clusters.** Note one ready test cluster per site (the cluster page shows `kagent is ready`). If kagent runs in a site's `local` cluster, set `clusters.include_local: true` so that cluster is listed. With fewer than three sites, list only those sites in the ConfigMap (and its CA `items`) and report only those sites.
 - [ ] **Agent pod log.** You need read access to the kagent agent pod log on one test cluster, for C2.

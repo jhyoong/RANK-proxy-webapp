@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.27.4 standard library (`net/http`, `html/template`, `embed`, `log/slog`) plus `go.yaml.in/yaml/v3` for the config file. Distroless image built by the existing `.github/workflows/image.yml`.
 
-**Spec:** [docs/design.md](../design.md) (Authentication across three sites) with corrections from [docs/verification.md](../verification.md) (C3, C10, C11, D4, D6, D15, D16) and on-site findings (kept out of this public repo).
+**Spec:** [docs/design.md](../design.md) (Authentication across three sites) with corrections from the verification notes (C3, C10, C11, D4, D6, D15, D16) and on-site findings (both kept out of this public repo).
 
 **Out of scope for Plan 1:** cluster listing, access checks, A2A chat, Redis, encryption at rest, rate limiting, NetworkPolicy, and 2 replicas. Each is a later plan.
 
@@ -358,4 +358,4 @@ All responses get the security headers from Global Constraints, through one midd
 
 - [ ] **Step 1:** Write both files. Validate the manifest with `kubectl apply --dry-run=client -f deploy/portal.yaml` (or `kubeconform` if kubectl isn't available).
 - [ ] **Step 2:** Stage the files and ask the user to commit: `docs: live-test kit for plan 1`.
-- [ ] **Step 3: Handoff:** the user pushes to GitHub (CI builds, scans and pushes the image), tags `v0.1.0`, moves the image into the network with the README's `skopeo` steps, runs `PLAN1-live-test.md`, and brings back the filled report. Results feed Plan 2 (cluster listing + access check).
+- [ ] **Step 3: Handoff:** the user pushes to GitHub (CI builds, scans and pushes the image), tags `v0.1.0`, moves the image into the network, runs `PLAN1-live-test.md`, and brings back the filled report. Results feed Plan 2 (cluster listing + access check).

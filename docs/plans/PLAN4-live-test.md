@@ -6,7 +6,7 @@ Run this inside the target network with the `v0.4.0` image, then type up the sho
 
 ## Before you start
 
-- [ ] **Image.** Move the image in using the README's `skopeo` steps. Deploy `v0.4.0` by digest. Record the digest.
+- [ ] **Image.** Move the image into the internal registry. Deploy `v0.4.0` by digest. Record the digest.
 - [ ] **Config.** Keep the v0.3.x ConfigMap. Add the new keys (defaults shown; only `trusted_proxies` has no useful default):
   ```yaml
   login:

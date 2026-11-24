@@ -1,7 +1,7 @@
 # RANK-proxy-webapp
 
 RANcher Kagent webapp.
-Chat portal for kagent across Rancher-managed clusters. See [docs/design.md](docs/design.md) and [docs/verification.md](docs/verification.md).
+Chat portal for kagent across Rancher-managed clusters. See [docs/design.md](docs/design.md).
 
 ## Build locally
 
@@ -72,14 +72,3 @@ For the on-site live test (the `kagent`, `clusters` and `api` blocks in the Conf
 Images go to `ghcr.io/jhyoong/rank-proxy-webapp` using the built-in `GITHUB_TOKEN`; no secrets needed.
 
 To also push to Docker Hub, set in the repo settings: variables `DOCKERHUB_USERNAME` and `DOCKERHUB_IMAGE` (e.g. `youruser/rank-proxy-webapp`), and secret `DOCKERHUB_TOKEN` (a Docker Hub access token).
-
-## Moving an image into the air-gapped network
-
-```sh
-# outside
-skopeo copy docker://ghcr.io/jhyoong/rank-proxy-webapp:X.Y.Z docker-archive:portal-X.Y.Z.tar
-# inside
-skopeo copy docker-archive:portal-X.Y.Z.tar docker://<internal-registry>/rank-proxy-webapp:X.Y.Z
-```
-
-Deploy by digest. If the GHCR package is private, run `skopeo login ghcr.io` first.
