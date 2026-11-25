@@ -36,6 +36,15 @@
   var placeholder = msg.getAttribute('placeholder') || '';
   var strip = document.getElementById('feedback-strip');
   var feedbackUrl = ds.feedbackUrl || '', page = ds.page || '';
+  // fbLive announces the feedback strip politely (its appearance, thanks,
+  // errors) without making the whole strip a live region. It is in the page
+  // from the start so screen readers pick up its first change.
+  var fbLive = null;
+  if (strip) {
+    fbLive = el('p', 'sr-only');
+    fbLive.setAttribute('role', 'status');
+    strip.parentNode.insertBefore(fbLive, strip.nextSibling);
+  }
 
   // ---------- Renderer ----------
 
@@ -386,6 +395,7 @@
   // transcript first loads.
   function adopt(text) {
     history.replaceState(null, '', '?c=' + contextId);
+    syncFeedbackLinks();
     transcriptUrl = conversationUrl();
     if (!convs) return;
     var chars = Array.from(text);
@@ -403,6 +413,18 @@
     } else {
       convs.insertBefore(li, first);
       convs.insertBefore(el('li', 'group', 'Today'), li);
+    }
+  }
+
+  // syncFeedbackLinks points the footer and user-menu feedback links, and
+  // the strip's page, at the current URL (which adopt has just given ?c=).
+  function syncFeedbackLinks() {
+    page = location.pathname + location.search;
+    var links = document.querySelectorAll('a[data-feedback-link]');
+    for (var i = 0; i < links.length; i++) {
+      var u = new URL(links[i].href);
+      u.searchParams.set('from', page);
+      links[i].href = u.pathname + u.search;
     }
   }
 
@@ -498,6 +520,11 @@
       sessionStorage.setItem(key, '1');
     } catch (e) { /* storage unavailable: show it anyway */ }
     showFeedback();
+    announce('How was this session? Rate it from 1 to 5 above the message box.');
+  }
+
+  function announce(text) {
+    if (fbLive) fbLive.textContent = text;
   }
 
   // hideFeedback clears the strip (unanswered or showing its thanks).
@@ -505,6 +532,7 @@
     if (!strip || strip.hidden) return;
     strip.hidden = true;
     strip.textContent = '';
+    announce('');
   }
 
   function showFeedback() {
@@ -558,6 +586,8 @@
       var all = btns.concat([skipBtn, sendFb, close]);
       all.forEach(function (b) { b.disabled = true; });
       status.textContent = '';
+      announce('');
+      var failed = "Couldn't send feedback";
       var body = new URLSearchParams();
       body.set('rating', String(rating));
       if (withComment) body.set('comment', comment.value);
@@ -571,12 +601,21 @@
           body: body
         });
         if (resp.status === 204) {
+          // The focused button is about to go: give the focus to the
+          // composer rather than let it fall to <body>.
+          var act = document.activeElement;
+          var refocus = !act || act === document.body || strip.contains(act);
           strip.textContent = '';
           strip.appendChild(el('p', 'feedback-thanks', 'Thanks for your feedback'));
+          announce('Thanks for your feedback');
+          if (refocus && !msg.disabled) msg.focus();
           return;
         }
+        // The rate limit's message (http.Error's plain-text body) says to wait.
+        if (resp.status === 429) failed = (await resp.text()).trim() || failed;
       } catch (e) { /* fall through */ }
-      status.textContent = "Couldn't send feedback";
+      status.textContent = failed;
+      announce(failed);
       all.forEach(function (b) { b.disabled = false; });
     }
     skipBtn.addEventListener('click', function () { submit(false); });

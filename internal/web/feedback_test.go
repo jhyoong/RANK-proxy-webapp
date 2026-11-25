@@ -339,3 +339,34 @@ func TestFeedback_CRLFCommentAtCap(t *testing.T) {
 		t.Fatalf("comment kept CR: %q", got[:110])
 	}
 }
+
+// Links on the feedback page itself point back at the page the user came
+// from, not at the feedback page (no nested from=/feedback?...).
+func TestFooter_FeedbackPageKeepsFrom(t *testing.T) {
+	f := newFB(t)
+	body := strings.ToLower(f.do("GET", "/feedback?source=footer&from=/home", nil, f.cookie).Body.String())
+	for _, want := range []string{
+		`href="/feedback?source=footer&amp;from=%2fhome"`,
+		`href="/feedback?source=menu&amp;from=%2fhome"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("feedback page lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "%2ffeedback") {
+		t.Errorf("feedback page links nest the feedback page's own path")
+	}
+}
+
+// An oversized page-form post (no X-CSRF-Token header) is refused as too
+// large, not as a CSRF failure, and logs nothing.
+func TestFeedback_OversizedFormIs413(t *testing.T) {
+	f := newFB(t)
+	rr := f.post(url.Values{"rating": {"3"}, "comment": {strings.Repeat("a", maxFeedbackForm+1)}}, false)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("code %d body %q", rr.Code, rr.Body.String())
+	}
+	if n := len(f.events(t)); n != 0 {
+		t.Fatalf("logged %d events", n)
+	}
+}

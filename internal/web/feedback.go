@@ -108,6 +108,13 @@ func (s *server) feedbackSubmit(w http.ResponseWriter, r *http.Request) {
 	s.setBodyDeadline(w)
 	r.Body = http.MaxBytesReader(w, r.Body, maxFeedbackForm)
 	perr := r.ParseForm()
+	// A body over the cap leaves PostForm without the csrf field, so report
+	// it as too large before the CSRF check; the request did nothing either way.
+	var tooBig *http.MaxBytesError
+	if errors.As(perr, &tooBig) {
+		http.Error(w, "feedback too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 	token := r.Header.Get("X-CSRF-Token")
 	if !api {
 		token = r.PostForm.Get("csrf")
@@ -117,12 +124,7 @@ func (s *server) feedbackSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if perr != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(perr, &tooBig) {
-			http.Error(w, "feedback too large", http.StatusRequestEntityTooLarge)
-		} else {
-			http.Error(w, "bad request", http.StatusBadRequest)
-		}
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	f := r.PostForm
@@ -182,7 +184,7 @@ func (s *server) feedbackSubmit(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	s.render(w, r, http.StatusOK, "feedback", pageData{Session: sess, Feedback: feedbackForm{Sent: true}})
+	s.render(w, r, http.StatusOK, "feedback", pageData{Session: sess, Feedback: feedbackForm{Sent: true, From: fb.From}})
 }
 
 // ratingLabels label the 1–5 scale on the feedback page.

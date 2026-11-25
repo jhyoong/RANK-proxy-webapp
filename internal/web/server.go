@@ -222,12 +222,20 @@ type pageData struct {
 	MaxDurationMS int64
 	// Feedback page: the form's values, or Sent for the thanks card.
 	Feedback feedbackForm
-	// Path is the request's path and query, for the footer's feedback link.
-	Path string
+	// Path is the request's path and query (the chat strip's page).
+	// FeedbackFrom is the from= of the footer and user-menu feedback links:
+	// Path, except on the feedback page, where it is the page the user came
+	// from (so the links never nest the feedback page's own URL).
+	Path         string
+	FeedbackFrom string
 }
 
 func (s *server) render(w http.ResponseWriter, r *http.Request, code int, page string, d pageData) {
 	d.Path = r.URL.RequestURI()
+	d.FeedbackFrom = d.Path
+	if page == "feedback" {
+		d.FeedbackFrom = d.Feedback.From
+	}
 	d.Version = s.version
 	d.UI = s.cfg.UI
 	d.Help = helpParagraphs(s.cfg.UI.LoginHelp)

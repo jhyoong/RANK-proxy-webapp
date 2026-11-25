@@ -5,7 +5,8 @@
  * borders, icons and placeholders.
  *
  * Shells (layout.html)
- *   body.app          inner pages: .topbar (.brand, ol.crumbs > li, details.user-menu > summary + .user-menu-panel), main
+ *   body.app          inner pages: .topbar (.brand, ol.crumbs > li, details.user-menu > summary + .user-menu-panel), main,
+ *                     .site-footer; a flex column at least 100vh tall in which main grows, so the footer sits at the bottom
  *   body.bare         login and signed-out pages: main.bare-main, full height, no top bar
  *   .centered         centres one child in the viewport (signed-out card, unavailable screen)
  *
@@ -29,6 +30,7 @@
  *   .page-head        heading row: h1, .count, .page-actions (pushed right)
  *   .search           search form row: input[type=search] + chips
  *   .icon             inline SVG icon (1em, currentColor stroke)
+ *   .sr-only          visually hidden, still read by screen readers (chat: the feedback strip's role="status")
  *   .site-footer      inner pages' footer (height --footer-h): "Give feedback" link
  *
  * Feedback (feedback.html, chat strip)
@@ -335,7 +337,12 @@ body.bare .centered { min-height: 100vh; background: var(--slate-50); }
 .user-menu-panel .btn { width: 100%; }
 .user-menu-version { font-size: .75rem; color: var(--slate-500); margin: 0; }
 
-body.app main { padding: var(--s5) var(--s6); max-width: 72rem; margin: 0 auto; }
+/* A flex column at least the viewport tall, so the footer sits at the bottom of short pages. height: auto
+   (not the 100% set above) lets the body grow with long pages, so the sticky top bar's containing block
+   is the whole page. main grows into the spare height; width: 100% keeps it full width up to max-width
+   (auto side margins in a flex column would otherwise shrink it to its content) and centred. */
+body.app { display: flex; flex-direction: column; height: auto; min-height: 100vh; }
+body.app main { flex: 1 0 auto; width: 100%; padding: var(--s5) var(--s6); max-width: 72rem; margin: 0 auto; }
 
 @media (max-width: 600px) {
   body.app main { padding: var(--s4); }
@@ -424,6 +431,16 @@ body.app main { padding: var(--s5) var(--s6); max-width: 72rem; margin: 0 auto; 
 .unavailable p { color: var(--slate-600); }
 .unavailable .notice { margin: var(--s4) 0; color: var(--navy); background: var(--slate-50); }
 .unavailable .reference { margin-top: var(--s4); font-size: .75rem; color: var(--slate-500); }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
 
 /* ---------- Chat ---------- */
 
