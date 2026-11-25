@@ -16,8 +16,9 @@
       {{end}}
     </ul>
   </aside>
-  <section id="chat" class="chat-main" data-chat-url="/clusters/{{esc .Row.Site}}/{{esc .Row.ID}}/chat"{{with .Current}} data-transcript-url="/clusters/{{esc $.Row.Site}}/{{esc $.Row.ID}}/conversations/{{.}}"{{end}} data-csrf="{{.Session.CSRF}}" data-context-id="{{.ContextID}}" data-cluster-name="{{.Row.DisplayName}}" data-support-email="{{.UI.SupportEmail}}" data-max-duration-ms="{{.MaxDurationMS}}">
+  <section id="chat" class="chat-main" data-chat-url="/clusters/{{esc .Row.Site}}/{{esc .Row.ID}}/chat"{{with .Current}} data-transcript-url="/clusters/{{esc $.Row.Site}}/{{esc $.Row.ID}}/conversations/{{.}}"{{end}} data-csrf="{{.Session.CSRF}}" data-context-id="{{.ContextID}}" data-cluster-name="{{.Row.DisplayName}}" data-support-email="{{.UI.SupportEmail}}" data-max-duration-ms="{{.MaxDurationMS}}" data-feedback-url="/feedback" data-page="{{.Path}}">
     <div id="log" aria-live="polite"></div>
+    <div id="feedback-strip" class="feedback-strip" hidden></div>
     <p class="empty">Ask kagent about {{.Row.DisplayName}}</p>
     <div class="composer">
       <textarea id="msg" maxlength="{{.MaxMessage}}" rows="2" placeholder="Ask kagent about this cluster…" aria-label="Message"></textarea>

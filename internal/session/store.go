@@ -79,6 +79,10 @@ func capKey(sess *Session) string {
 }
 
 // endLocked moves the session to the ended queue. s.mu must be held.
+// Key is the identity this session counts against for per-user limits:
+// the AD principal when known (case-folded), else the normalised username.
+func (sess *Session) Key() string { return capKey(sess) }
+
 func (s *Store) endLocked(id, reason string) {
 	sess, ok := s.m[id]
 	if !ok {

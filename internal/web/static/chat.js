@@ -34,6 +34,8 @@
   var pollFails = 0, lastBody = null;
   var asking = null;        // {card, taskId}: the ask_user question awaiting an answer
   var placeholder = msg.getAttribute('placeholder') || '';
+  var strip = document.getElementById('feedback-strip');
+  var feedbackUrl = ds.feedbackUrl || '', page = ds.page || '';
 
   // ---------- Renderer ----------
 
@@ -407,6 +409,7 @@
   async function send() {
     var text = msg.value.trim();
     if (!text || ctrl || locked || polling || asking) return;
+    hideFeedback();
     addUser(text);
     msg.value = '';
     updateCount();
@@ -478,8 +481,108 @@
         followTurn();
       } else {
         ready(true);
+        maybeFeedback();
       }
     }
+  }
+
+  // ---------- Feedback strip ----------
+
+  // maybeFeedback shows "How was this session?" after a live reply that
+  // finished cleanly, once per conversation (remembered in sessionStorage).
+  function maybeFeedback() {
+    if (!strip || !feedbackUrl || !gotDone || errored || asking) return;
+    var key = 'fb:' + contextId;
+    try {
+      if (sessionStorage.getItem(key)) return;
+      sessionStorage.setItem(key, '1');
+    } catch (e) { /* storage unavailable: show it anyway */ }
+    showFeedback();
+  }
+
+  // hideFeedback clears the strip (unanswered or showing its thanks).
+  function hideFeedback() {
+    if (!strip || strip.hidden) return;
+    strip.hidden = true;
+    strip.textContent = '';
+  }
+
+  function showFeedback() {
+    var rating = 0;
+    strip.textContent = '';
+    var row = el('div', 'feedback-row');
+    row.appendChild(el('span', 'feedback-label', 'How was this session?'));
+    var scale = el('div', 'rating-scale');
+    scale.setAttribute('role', 'group');
+    scale.setAttribute('aria-label', 'Rating from 1 (poor) to 5 (excellent)');
+    var btns = [1, 2, 3, 4, 5].map(function (n) {
+      var b = el('button', '', String(n));
+      b.type = 'button';
+      b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', function () {
+        rating = n;
+        btns.forEach(function (o, i) { o.setAttribute('aria-pressed', i + 1 === n ? 'true' : 'false'); });
+        extra.hidden = false;
+      });
+      scale.appendChild(b);
+      return b;
+    });
+    row.appendChild(scale);
+    var close = el('button', 'feedback-close', '\u00d7');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.addEventListener('click', hideFeedback);
+    row.appendChild(close);
+    strip.appendChild(row);
+
+    var extra = el('div', 'feedback-extra');
+    extra.hidden = true;
+    var comment = el('textarea');
+    comment.rows = 2;
+    comment.maxLength = 2000;
+    comment.placeholder = 'Anything to add? (optional)';
+    comment.setAttribute('aria-label', 'Comment (optional)');
+    var actions = el('div', 'feedback-actions');
+    var status = el('span', 'feedback-status');
+    var skipBtn = el('button', 'btn', 'Skip');
+    var sendFb = el('button', 'btn btn-primary', 'Send');
+    skipBtn.type = sendFb.type = 'button';
+    actions.appendChild(status);
+    actions.appendChild(skipBtn);
+    actions.appendChild(sendFb);
+    extra.appendChild(comment);
+    extra.appendChild(actions);
+    strip.appendChild(extra);
+
+    async function submit(withComment) {
+      var all = btns.concat([skipBtn, sendFb, close]);
+      all.forEach(function (b) { b.disabled = true; });
+      status.textContent = '';
+      var body = new URLSearchParams();
+      body.set('rating', String(rating));
+      if (withComment) body.set('comment', comment.value);
+      body.set('source', 'chat');
+      body.set('from', page);
+      body.set('conversation', contextId);
+      try {
+        var resp = await fetch(feedbackUrl, {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'X-CSRF-Token': csrf },
+          body: body
+        });
+        if (resp.status === 204) {
+          strip.textContent = '';
+          strip.appendChild(el('p', 'feedback-thanks', 'Thanks for your feedback'));
+          return;
+        }
+      } catch (e) { /* fall through */ }
+      status.textContent = "Couldn't send feedback";
+      all.forEach(function (b) { b.disabled = false; });
+    }
+    skipBtn.addEventListener('click', function () { submit(false); });
+    sendFb.addEventListener('click', function () { submit(true); });
+
+    strip.hidden = false;
   }
 
   // followTurn keeps the composer disabled and follows the turn through its

@@ -297,3 +297,12 @@ func TestCreate_CapByPrincipal(t *testing.T) {
 		t.Fatal("new session missing")
 	}
 }
+
+func TestSessionKey(t *testing.T) {
+	if got := (&Session{Principal: "AD://X", Username: "jdoe"}).Key(); got != "ad://x" {
+		t.Errorf("principal: %q", got)
+	}
+	if got := (&Session{Username: `CORP\JDoe`}).Key(); got != "jdoe" {
+		t.Errorf("username: %q", got)
+	}
+}

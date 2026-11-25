@@ -22,6 +22,7 @@ may define "crumbs" as <li> items after the brand. */}}
     <div class="user-menu-panel">
       <p class="user-menu-who">Signed in as <strong>{{.Username}}</strong></p>
       {{with $.UI.SupportEmail}}<p>Support: <a href="mailto:{{.}}">{{.}}</a></p>{{else}}<p>Need help? Contact your platform team.</p>{{end}}
+      <p><a href="/feedback?source=menu&amp;from={{$.Path | urlquery}}" target="_blank" rel="noopener">Give feedback</a></p>
       <form method="post" action="/logout">
         <input type="hidden" name="csrf" value="{{.CSRF}}">
         <button type="submit" class="btn">Sign out</button>
@@ -32,6 +33,7 @@ may define "crumbs" as <li> items after the brand. */}}
   {{end}}
 </header>
 <main>{{template "content" .}}</main>
+{{if .Session}}<footer class="site-footer"><a href="/feedback?source=footer&amp;from={{.Path | urlquery}}" target="_blank" rel="noopener">Give feedback</a></footer>{{end}}
 </body>
 </html>{{end}}
 

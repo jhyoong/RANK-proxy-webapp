@@ -73,6 +73,7 @@ type server struct {
 	pages   map[string]*template.Template
 	userLim *ratelimit.Limiter
 	ipLim   *ratelimit.Limiter
+	fbLim   *ratelimit.Limiter
 	trusted []netip.Prefix
 
 	mu     sync.Mutex
@@ -97,8 +98,11 @@ func build(cfg *config.Config, a Authn, c Clusters, ch Chat, h History, store *s
 	}
 	s.userLim = ratelimit.New(cfg.Login.MaxAttemptsPerUser, cfg.Login.AttemptWindow, s.now)
 	s.ipLim = ratelimit.New(cfg.Login.MaxAttemptsPerIP, cfg.Login.AttemptWindow, s.now)
-	funcs := template.FuncMap{"principal": principalOf, "esc": url.PathEscape, "rfc3339": rfc3339}
-	for _, p := range []string{"login", "home", "cluster", "loggedout"} {
+	// Through a closure so a clock swapped in after build is used.
+	s.fbLim = ratelimit.New(feedbackPerHour, time.Hour, func() time.Time { return s.now() })
+	funcs := template.FuncMap{"principal": principalOf, "esc": url.PathEscape, "rfc3339": rfc3339,
+		"ratingLabels": func() []string { return ratingLabels }, "add": func(a, b int) int { return a + b }}
+	for _, p := range []string{"login", "home", "cluster", "loggedout", "feedback"} {
 		t, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/"+p+".html")
 		if err != nil {
 			return nil, nil, err
@@ -119,6 +123,8 @@ func build(cfg *config.Config, a Authn, c Clusters, ch Chat, h History, store *s
 	mux.HandleFunc("POST /clusters/{site}/{id}/chat", s.chat)
 	mux.HandleFunc("GET /clusters/{site}/{id}/conversations/{cid}", s.transcript)
 	mux.HandleFunc("POST /logout", s.logout)
+	mux.HandleFunc("GET /feedback", s.feedbackPage)
+	mux.HandleFunc("POST /feedback", s.feedbackSubmit)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(version + "\n")) })
@@ -214,9 +220,14 @@ type pageData struct {
 	ContextID     string
 	MaxMessage    int
 	MaxDurationMS int64
+	// Feedback page: the form's values, or Sent for the thanks card.
+	Feedback feedbackForm
+	// Path is the request's path and query, for the footer's feedback link.
+	Path string
 }
 
-func (s *server) render(w http.ResponseWriter, code int, page string, d pageData) {
+func (s *server) render(w http.ResponseWriter, r *http.Request, code int, page string, d pageData) {
+	d.Path = r.URL.RequestURI()
 	d.Version = s.version
 	d.UI = s.cfg.UI
 	d.Help = helpParagraphs(s.cfg.UI.LoginHelp)
@@ -257,7 +268,7 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	s.render(w, http.StatusOK, "login", pageData{Error: loginErrors[q.Get("e")], Expired: q.Get("expired") == "1"})
+	s.render(w, r, http.StatusOK, "login", pageData{Error: loginErrors[q.Get("e")], Expired: q.Get("expired") == "1"})
 }
 
 // failureCode picks the ?e= code for a failed login.
@@ -301,13 +312,13 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	s.setBodyDeadline(w)
 	r.Body = http.MaxBytesReader(w, r.Body, maxFormSize)
 	if err := r.ParseForm(); err != nil {
-		s.render(w, http.StatusBadRequest, "login", pageData{Error: "Request too large"})
+		s.render(w, r, http.StatusBadRequest, "login", pageData{Error: "Request too large"})
 		return
 	}
 	username := strings.TrimSpace(r.PostForm.Get("username"))
 	password := r.PostForm.Get("password")
 	if username == "" || password == "" {
-		s.render(w, http.StatusBadRequest, "login", pageData{Error: "Enter username and password", Username: username})
+		s.render(w, r, http.StatusBadRequest, "login", pageData{Error: "Enter username and password", Username: username})
 		return
 	}
 	// Count the attempt before calling Rancher so parallel requests cannot
@@ -436,7 +447,7 @@ func (s *server) home(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = in
 	}
-	s.render(w, http.StatusOK, "home", pageData{Session: sess, Listing: l, Rows: rows, Query: q, Sites: chips, Site: site,
+	s.render(w, r, http.StatusOK, "home", pageData{Session: sess, Listing: l, Rows: rows, Query: q, Sites: chips, Site: site,
 		SiteNotices: siteNotices(sess.Sites, l), Count: len(rows), UpdatedAgo: ago(s.now().Sub(l.Fetched))})
 }
 
@@ -481,7 +492,7 @@ func (s *server) cluster(w http.ResponseWriter, r *http.Request) {
 	}
 	d := pageData{Session: sess, Row: row, Check: res}
 	if res.Outcome != clusters.OutcomeReady {
-		s.render(w, http.StatusOK, "cluster", d)
+		s.render(w, r, http.StatusOK, "cluster", d)
 		return
 	}
 	convs, err := s.hist.List(r.Context(), sess.Sites, row)
@@ -505,7 +516,7 @@ func (s *server) cluster(w http.ResponseWriter, r *http.Request) {
 	}
 	d.MaxMessage = s.cfg.Chat.MaxMessageBytes
 	d.MaxDurationMS = s.cfg.Chat.MaxDuration.Milliseconds()
-	s.render(w, http.StatusOK, "cluster", d)
+	s.render(w, r, http.StatusOK, "cluster", d)
 }
 
 // expire ends sess like /logout: the session is removed at once and its
@@ -551,5 +562,5 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	results := s.authn.Logout(ctx, sess.Sites)
 	s.setCookie(w, "", -1)
-	s.render(w, http.StatusOK, "loggedout", pageData{Session: sess, Logout: results})
+	s.render(w, r, http.StatusOK, "loggedout", pageData{Session: sess, Logout: results})
 }

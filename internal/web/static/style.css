@@ -29,6 +29,13 @@
  *   .page-head        heading row: h1, .count, .page-actions (pushed right)
  *   .search           search form row: input[type=search] + chips
  *   .icon             inline SVG icon (1em, currentColor stroke)
+ *   .site-footer      inner pages' footer (height --footer-h): "Give feedback" link
+ *
+ * Feedback (feedback.html, chat strip)
+ *   .feedback-card    card holding the feedback form or the thanks message
+ *   .rating-scale     fieldset of radio inputs (visually hidden) + labels styled as buttons; also used by
+ *                     the chat strip's buttons ([aria-pressed="true"] selected)
+ *   .feedback-strip   chat: "How was this session?" between #log and .composer
  *
  * Chat (cluster page)
  *   .chat-layout      grid: aside.sidebar (240px) + .chat-main. Under 900px the sidebar is a drawer toggled by
@@ -73,6 +80,7 @@
   --r-sm: 6px;
   --r-md: 8px;
   --r-lg: 10px;
+  --footer-h: 2.25rem;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -435,7 +443,7 @@ body.app main:has(.chat-layout) { max-width: none; padding: 0; }
 .chat-layout {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
-  height: calc(100vh - 48px);
+  height: calc(100vh - 48px - var(--footer-h));
   background: #fff;
 }
 
@@ -638,7 +646,7 @@ body.app main:has(.chat-layout) { max-width: none; padding: 0; }
     cursor: pointer;
   }
   #sidebar-toggle:focus-visible + .sidebar-toggle { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .chat-layout { height: calc(100vh - 48px - 2.5rem - var(--s4)); }
+  .chat-layout { height: calc(100vh - 48px - 2.5rem - var(--s4) - var(--footer-h)); }
   .sidebar {
     position: absolute;
     inset: 0 auto 0 0;
@@ -703,3 +711,79 @@ body.app main:has(.chat-layout) { max-width: none; padding: 0; }
   .notice.working::before { animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .3; } }
 }
+
+/* Footer and feedback */
+.site-footer {
+  height: var(--footer-h);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: .8rem;
+  border-top: 1px solid var(--slate-200);
+  background: var(--slate-50);
+}
+.site-footer a { color: var(--slate-600); }
+.site-footer a:hover { color: var(--accent); }
+
+.feedback-card { max-width: 36rem; margin: var(--s6) auto; }
+.feedback-card form { display: flex; flex-direction: column; gap: var(--s3); }
+.feedback-card textarea { width: 100%; resize: vertical; }
+.feedback-card .btn-primary { align-self: flex-start; }
+
+.rating-scale { display: flex; flex-wrap: wrap; gap: var(--s2); margin: 0; padding: 0; border: 0; }
+.rating-scale legend { margin-bottom: var(--s2); font-size: .9rem; color: var(--slate-600); }
+.rating-scale input[type=radio] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.rating-scale label, .rating-scale button {
+  min-width: 2.5rem;
+  padding: var(--s1) var(--s3);
+  font-size: .9rem;
+  color: var(--navy);
+  text-align: center;
+  background: #fff;
+  border: 1px solid var(--slate-300);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.rating-scale label:hover, .rating-scale button:hover { background: var(--slate-100); }
+.rating-scale input:checked + label, .rating-scale button[aria-pressed="true"] {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.rating-scale input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: 2px; }
+.feedback-comment-label { margin-top: var(--s2); }
+
+.feedback-strip {
+  margin: 0 var(--s5) var(--s2);
+  padding: var(--s2) var(--s3);
+  font-size: .9rem;
+  background: var(--slate-50);
+  border: 1px solid var(--slate-200);
+  border-radius: var(--r-md);
+}
+.feedback-strip[hidden] { display: none; }
+.feedback-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s3); }
+.feedback-label { color: var(--slate-600); }
+.feedback-strip .rating-scale button { min-width: 2rem; padding: 2px var(--s2); }
+.feedback-close {
+  margin-left: auto;
+  padding: 0 var(--s2);
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--slate-500);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.feedback-close:hover { color: var(--navy); }
+.feedback-extra { margin-top: var(--s2); }
+.feedback-extra[hidden] { display: none; }
+.feedback-extra textarea { width: 100%; resize: vertical; }
+.feedback-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--s2); margin-top: var(--s2); }
+.feedback-status { margin-right: auto; color: var(--error); }
+.feedback-thanks { margin: 0; color: var(--ok); }
