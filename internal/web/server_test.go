@@ -172,7 +172,7 @@ type harness struct {
 
 func newHarness(t *testing.T, secure bool) harness {
 	t.Helper()
-	cfg := &config.Config{CookieSecure: &secure, Sites: []config.Site{{Name: "site-1"}, {Name: "site-2"}, {Name: "site-3"}},
+	cfg := &config.Config{CookieSecure: &secure, Sites: []config.Site{{Name: "site-1", URL: "https://r1.example"}, {Name: "site-2", URL: "https://r2.example"}, {Name: "site-3"}},
 		Login:    config.LoginConfig{MaxAttemptsPerUser: 3, MaxAttemptsPerIP: 20, AttemptWindow: 15 * time.Minute},
 		Clusters: config.ClustersConfig{CacheTTL: 2 * time.Minute}, Chat: config.ChatConfig{MaxMessageBytes: 8192, MaxDuration: 30 * time.Minute}}
 	stub := &stubAuthn{result: okResult()}
@@ -333,6 +333,20 @@ func TestHome_Columns(t *testing.T) {
 	for _, id := range []string{"c-abc12", "c-down1", "c-xyz99"} {
 		if strings.Contains(body, ">"+id+"<") || strings.Contains(body, "<code>") {
 			t.Fatalf("ID %s shown", id)
+		}
+	}
+}
+
+func TestHome_RancherLinks(t *testing.T) {
+	hs := newHarness(t, true)
+	body := hs.do("GET", "/home", nil, hs.login(t)).Body.String()
+	for _, href := range []string{
+		"https://r1.example/dashboard/c/c-abc12/explorer",
+		"https://r1.example/dashboard/c/c-down1/explorer",
+		"https://r2.example/dashboard/c/c-xyz99/explorer",
+	} {
+		if !strings.Contains(body, `href="`+href+`" target="_blank" rel="noopener noreferrer"`) {
+			t.Fatalf("Rancher link %s missing", href)
 		}
 	}
 }

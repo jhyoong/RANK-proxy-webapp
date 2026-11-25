@@ -100,7 +100,7 @@ func build(cfg *config.Config, a Authn, c Clusters, ch Chat, h History, store *s
 	s.ipLim = ratelimit.New(cfg.Login.MaxAttemptsPerIP, cfg.Login.AttemptWindow, s.now)
 	// Through a closure so a clock swapped in after build is used.
 	s.fbLim = ratelimit.New(feedbackPerHour, time.Hour, func() time.Time { return s.now() })
-	funcs := template.FuncMap{"principal": principalOf, "esc": url.PathEscape, "rfc3339": rfc3339,
+	funcs := template.FuncMap{"principal": principalOf, "esc": url.PathEscape, "rfc3339": rfc3339, "rancherURL": s.rancherURL,
 		"ratingLabels": func() []string { return ratingLabels }, "add": func(a, b int) int { return a + b }}
 	for _, p := range []string{"login", "home", "cluster", "loggedout", "feedback"} {
 		t, err := template.New("layout.html").Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/"+p+".html")
@@ -419,6 +419,17 @@ func ago(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%d h ago", int(d/time.Hour))
 	}
+}
+
+// rancherURL is the Rancher dashboard link for a cluster on a site, or "" when
+// the site has no URL configured.
+func (s *server) rancherURL(site, id string) string {
+	for _, cs := range s.cfg.Sites {
+		if cs.Name == site && cs.URL != "" {
+			return cs.URL + "/dashboard/c/" + url.PathEscape(id) + "/explorer"
+		}
+	}
+	return ""
 }
 
 func (s *server) home(w http.ResponseWriter, r *http.Request) {
