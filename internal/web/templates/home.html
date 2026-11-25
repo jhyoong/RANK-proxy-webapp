@@ -26,13 +26,13 @@
 </form>
 {{if .Rows}}
 <table class="table">
-  <thead><tr><th>Name</th><th>Site</th><th>Status</th></tr></thead>
+  <thead><tr><th>Name</th><th>Site</th><th>Status</th><th><span class="sr-only">Rancher</span></th></tr></thead>
   <tbody>
   {{range .Rows}}
   {{if .Connected}}
-  <tr><td><a href="/clusters/{{esc .Site}}/{{esc .ID}}">{{.DisplayName}}</a></td><td>{{.Site}}</td><td><span class="status-dot ok"></span>Active</td></tr>
+  <tr><td><a href="/clusters/{{esc .Site}}/{{esc .ID}}">{{.DisplayName}}</a></td><td>{{.Site}}</td><td><span class="status-dot ok"></span>Active</td><td class="row-actions">{{with rancherURL .Site .ID}}<a class="btn btn-sm" href="{{.}}" target="_blank" rel="noopener noreferrer">Rancher Dashboard</a>{{end}}</td></tr>
   {{else}}
-  <tr class="disconnected"><td>{{.DisplayName}}</td><td>{{.Site}}</td><td><span class="status-dot off"></span>Disconnected</td></tr>
+  <tr class="disconnected"><td>{{.DisplayName}}</td><td>{{.Site}}</td><td><span class="status-dot off"></span>Disconnected</td><td class="row-actions">{{with rancherURL .Site .ID}}<a class="btn btn-sm" href="{{.}}" target="_blank" rel="noopener noreferrer">Rancher Dashboard</a>{{end}}</td></tr>
   {{end}}
   {{end}}
   </tbody>
