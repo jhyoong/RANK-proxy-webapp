@@ -1,0 +1,29 @@
+{{template "shell" .}}
+{{define "crumbs"}}<li aria-current="page">Feedback</li>{{end}}
+{{define "content"}}
+<div class="card feedback-card">
+{{if .Feedback.Sent}}
+  <h1>Thanks for your feedback</h1>
+  <p>You can close this tab.</p>
+  <a class="btn" href="/home">Back to clusters</a>
+{{else}}
+  <h1>Rate your experience</h1>
+  {{with .Feedback.Error}}<p class="notice error" role="alert">{{.}}</p>{{end}}
+  <form method="post" action="/feedback">
+    <input type="hidden" name="csrf" value="{{.Session.CSRF}}">
+    <input type="hidden" name="source" value="{{.Feedback.Source}}">
+    <input type="hidden" name="from" value="{{.Feedback.From}}">
+    <fieldset class="rating-scale">
+      <legend>How would you rate the kagent portal?</legend>
+      {{range $i, $label := ratingLabels}}{{$n := add $i 1}}
+      <input type="radio" id="rating-{{$n}}" name="rating" value="{{$n}}"{{if eq $.Feedback.Rating $n}} checked{{end}}>
+      <label for="rating-{{$n}}">{{$label}}</label>
+      {{end}}
+    </fieldset>
+    <label class="feedback-comment-label" for="comment">Anything else you'd like to tell us?</label>
+    <textarea id="comment" name="comment" rows="5" maxlength="2000">{{.Feedback.Comment}}</textarea>
+    <button type="submit" class="btn btn-primary">Submit</button>
+  </form>
+{{end}}
+</div>
+{{end}}
